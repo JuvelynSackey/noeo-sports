@@ -179,3 +179,78 @@ class ModelVersionDetailOut(ModelVersionSummaryOut):
     # this endpoint's audience accordingly until it is.
     hyperparameters: dict | None
     parameters: dict | None
+
+
+class ScorelineOut(BaseModel):
+    home_goals: int
+    away_goals: int
+    probability: float
+
+
+class ExpectedGoalsOut(BaseModel):
+    home: float | None
+    away: float | None
+    total: float | None
+
+
+class OutcomeDistributionOut(BaseModel):
+    home_win: float
+    draw: float
+    away_win: float
+
+
+class GoalDistributionOut(BaseModel):
+    buckets: dict[str, float]
+    expected_total_goals: float
+    median_total_goals: int
+    mode_total_goals: int
+    variance_total_goals: float
+    over_under: dict[str, float]
+    btts_probability: float
+    home_clean_sheet_probability: float
+    away_clean_sheet_probability: float
+    no_goals_probability: float
+
+
+class ModelDiagnosticsOut(BaseModel):
+    model_disagreement: str | None
+    aleatoric_uncertainty: float | None
+    epistemic_uncertainty: float | None
+    data_quality_score: float | None
+    ood_status: bool
+
+
+class ModelInformationOut(BaseModel):
+    champion_model: str | None
+    supporting_models: list[str]
+    model_version: str | None
+    dataset_version: str | None
+    feature_version: str
+    software_version: str
+    predicted_at: dt.datetime
+
+
+class AdministratorNotesOut(BaseModel):
+    warnings: list[str]
+    errors: list[str]
+
+
+class MatchForecastOut(BaseModel):
+    """MASTER BUILD PROMPT section 62 output format. `most_probable_scorelines`
+    are exactly that — a summary of the score matrix, never a guarantee."""
+
+    prediction_id: str
+    competition_canonical_id: str
+    season_canonical_id: str
+    fixture_canonical_id: str
+    kickoff_utc: dt.datetime | None
+    home_team: str
+    away_team: str
+    forecast_status: str
+    expected_goals: ExpectedGoalsOut
+    most_probable_scorelines: list[ScorelineOut]
+    outcome_distribution: OutcomeDistributionOut | None
+    goal_distribution: GoalDistributionOut | None
+    model_diagnostics: ModelDiagnosticsOut
+    model_information: ModelInformationOut
+    administrator_notes: AdministratorNotesOut

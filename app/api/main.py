@@ -1,35 +1,46 @@
 """FastAPI application — MASTER BUILD PROMPT section 56.
 
-Phase 1+2 scope: competition/season/team/fixture read endpoints, data
-quality, a full-sync trigger, and a system-health probe. Forecast, model
-and calibration endpoints are added as the phases that produce that data land.
+Phase 1-4 scope: competition/season/team/fixture read endpoints, data
+quality, league parameters, team strength, model versions, forecast
+generation (score matrix + everything derived from it), and a full-sync
+trigger. Calibration/ensemble endpoints are added as those phases land.
 
 NOTE: authentication/authorization (section 54) is not wired up yet — that
 is Phase 10. Do not expose this app on an untrusted network as-is; `/sync`
-in particular can trigger outbound provider calls and writes to the database.
+and `/forecast` in particular trigger writes to the database (and, for
+`/sync` with a live provider, outbound API calls).
 """
 from __future__ import annotations
 
+import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.api.schemas import (
+    AdministratorNotesOut,
     CompetitionDetailOut,
     CompetitionOut,
     DataQualityOut,
     DiscoveryReportOut,
+    ExpectedGoalsOut,
     FixtureOut,
+    GoalDistributionOut,
     LeagueParameterOut,
+    MatchForecastOut,
+    ModelDiagnosticsOut,
+    ModelInformationOut,
     ModelVersionDetailOut,
     ModelVersionSummaryOut,
     MovementReportOut,
+    OutcomeDistributionOut,
+    ScorelineOut,
     SyncReportOut,
     SystemHealthOut,
     TeamOut,
     TeamStrengthOut,
 )
-from app.config import get_settings
+from app.config import APP_VERSION, get_settings
 from app.data.providers import get_provider
 from app.database.base import get_db
 from app.database.models.competitions import Competition, Season
@@ -37,8 +48,11 @@ from app.database.models.enums import CompetitionStatus
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import ModelVersion
+from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
+from app.forecasting.score_matrix import most_probable_scorelines
+from app.services.forecast_service import ForecastService
 from app.services.sync_orchestrator import FullSyncService
 
 app = FastAPI(
@@ -47,7 +61,7 @@ app = FastAPI(
         "Probabilistic football forecasting and analytics platform. "
         "Forecasts are probability distributions, never guarantees."
     ),
-    version="0.2.0",
+    version=APP_VERSION,
 )
 
 
@@ -287,6 +301,162 @@ def get_model(version: str, db: Session = Depends(get_db)) -> ModelVersionDetail
         hyperparameters=mv.hyperparameters,
         parameters=mv.parameters,
     )
+
+
+def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecastOut:
+    fixture = db.get(Fixture, prediction.fixture_id)
+    competition = db.get(Competition, fixture.competition_id)
+    season = db.get(Season, fixture.season_id)
+    home_team = db.get(Team, fixture.home_team_id)
+    away_team = db.get(Team, fixture.away_team_id)
+
+    matrix_blob = prediction.score_matrix or {}
+    scorelines = []
+    if matrix_blob.get("matrix"):
+        scorelines = most_probable_scorelines(np.array(matrix_blob["matrix"]), get_settings().most_probable_scorelines_top_n)
+
+    goal_dist = prediction.goal_distribution or {}
+    goal_distribution_out = None
+    if goal_dist:
+        goal_distribution_out = GoalDistributionOut(
+            buckets=goal_dist.get("buckets", {}),
+            expected_total_goals=goal_dist.get("expected_total_goals", 0.0),
+            median_total_goals=goal_dist.get("median_total_goals", 0),
+            mode_total_goals=goal_dist.get("mode_total_goals", 0),
+            variance_total_goals=goal_dist.get("variance_total_goals", 0.0),
+            over_under=goal_dist.get("over_under", {}),
+            btts_probability=goal_dist.get("btts_probability", 0.0),
+            home_clean_sheet_probability=goal_dist.get("home_clean_sheet_probability", 0.0),
+            away_clean_sheet_probability=goal_dist.get("away_clean_sheet_probability", 0.0),
+            no_goals_probability=goal_dist.get("no_goals_probability", 0.0),
+        )
+
+    outcome = prediction.outcome_probabilities or {}
+    outcome_out = OutcomeDistributionOut(**outcome) if outcome else None
+
+    model_version = db.get(ModelVersion, prediction.model_version_id) if prediction.model_version_id else None
+    supporting = []
+    if model_version is not None:
+        sibling = (
+            db.query(ModelVersion)
+            .filter(
+                ModelVersion.competition_id == model_version.competition_id,
+                ModelVersion.model_name != model_version.model_name,
+                ModelVersion.status == "ENABLED",
+            )
+            .first()
+        )
+        if sibling is not None:
+            supporting.append(sibling.model_name)
+
+    validation = prediction.validation_report or {}
+
+    return MatchForecastOut(
+        prediction_id=prediction.prediction_id,
+        competition_canonical_id=competition.canonical_competition_id,
+        season_canonical_id=season.canonical_season_id,
+        fixture_canonical_id=fixture.canonical_fixture_id,
+        kickoff_utc=fixture.kickoff_utc,
+        home_team=home_team.canonical_team_id,
+        away_team=away_team.canonical_team_id,
+        forecast_status=prediction.forecast_status.value
+        if hasattr(prediction.forecast_status, "value")
+        else str(prediction.forecast_status),
+        expected_goals=ExpectedGoalsOut(
+            home=prediction.expected_goals_home,
+            away=prediction.expected_goals_away,
+            total=(prediction.expected_goals_home + prediction.expected_goals_away)
+            if prediction.expected_goals_home is not None and prediction.expected_goals_away is not None
+            else None,
+        ),
+        most_probable_scorelines=[ScorelineOut(**s) for s in scorelines],
+        outcome_distribution=outcome_out,
+        goal_distribution=goal_distribution_out,
+        model_diagnostics=ModelDiagnosticsOut(
+            model_disagreement=prediction.model_disagreement_level.value
+            if hasattr(prediction.model_disagreement_level, "value")
+            else prediction.model_disagreement_level,
+            aleatoric_uncertainty=prediction.aleatoric_uncertainty,
+            epistemic_uncertainty=prediction.epistemic_uncertainty,
+            data_quality_score=prediction.data_quality_score,
+            ood_status=prediction.ood_status,
+        ),
+        model_information=ModelInformationOut(
+            champion_model=model_version.model_name if model_version else None,
+            supporting_models=supporting,
+            model_version=model_version.version if model_version else None,
+            dataset_version=prediction.dataset_version,
+            feature_version=prediction.feature_version,
+            software_version=prediction.software_version,
+            predicted_at=prediction.predicted_at,
+        ),
+        administrator_notes=AdministratorNotesOut(
+            warnings=validation.get("warnings", []),
+            errors=validation.get("errors", []),
+        ),
+    )
+
+
+@app.post("/forecast", response_model=MatchForecastOut)
+def forecast(
+    fixture: str = Query(..., description="canonical_fixture_id"),
+    db: Session = Depends(get_db),
+) -> MatchForecastOut:
+    """Generates a NEW forecast and registers it (section 46: predictions are
+    never silently overwritten — this always creates a new Prediction row,
+    even if one already exists for this fixture)."""
+    fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=fixture).first()
+    if fixture_row is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+
+    ForecastService(db).generate(fixture_row)
+    latest = (
+        db.query(Prediction)
+        .filter_by(fixture_id=fixture_row.id)
+        .order_by(Prediction.predicted_at.desc())
+        .first()
+    )
+    return _to_match_forecast_out(db, latest)
+
+
+@app.get("/predictions/{canonical_fixture_id}", response_model=MatchForecastOut)
+def get_prediction(canonical_fixture_id: str, db: Session = Depends(get_db)) -> MatchForecastOut:
+    """Returns the most recent registered prediction for a fixture without
+    generating a new one — use POST /forecast to (re)generate."""
+    fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
+    if fixture_row is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    latest = (
+        db.query(Prediction)
+        .filter_by(fixture_id=fixture_row.id)
+        .order_by(Prediction.predicted_at.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No prediction registered for this fixture yet")
+    return _to_match_forecast_out(db, latest)
+
+
+@app.get("/predictions/{canonical_fixture_id}/distribution")
+def get_prediction_distribution(canonical_fixture_id: str, db: Session = Depends(get_db)) -> dict:
+    """The full underlying probability distribution — the score matrix and
+    goal distribution — rather than the summarized top-N scorelines."""
+    fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
+    if fixture_row is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    latest = (
+        db.query(Prediction)
+        .filter_by(fixture_id=fixture_row.id)
+        .order_by(Prediction.predicted_at.desc())
+        .first()
+    )
+    if latest is None:
+        raise HTTPException(status_code=404, detail="No prediction registered for this fixture yet")
+    return {
+        "prediction_id": latest.prediction_id,
+        "score_matrix": latest.score_matrix,
+        "goal_distribution": latest.goal_distribution,
+    }
 
 
 @app.post("/sync", response_model=SyncReportOut)

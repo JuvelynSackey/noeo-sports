@@ -10,6 +10,8 @@ from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+APP_VERSION = "0.4.0"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -51,6 +53,18 @@ class Settings(BaseSettings):
     # when a competition/season has fewer than this many matches.
     league_shrinkage_min_sample: int = 30
     league_shrinkage_prior_strength: float = 20.0
+
+    # Score matrix / forecast generation (sections 25-30, 61)
+    score_matrix_initial_max_goals: int = 10
+    score_matrix_tail_threshold: float = 1e-4
+    score_matrix_max_goals_cap: int = 25
+    most_probable_scorelines_top_n: int = 5
+    over_under_lines: list[float] = [0.5, 1.5, 2.5, 3.5, 4.5]
+
+    # Model disagreement thresholds (section 39) — max abs difference in
+    # outcome probabilities between the champion and a supporting model.
+    model_disagreement_low_threshold: float = 0.05
+    model_disagreement_high_threshold: float = 0.15
 
 
 @lru_cache

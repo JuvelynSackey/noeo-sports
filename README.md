@@ -21,6 +21,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 1 — Database + provider abstraction + competition discovery.**
 - **Phase 2 — Historical data ingestion + validation + team mapping.**
 - **Phase 3 — Dixon-Coles + Poisson + dynamic team-strength models.**
+- **Phase 4 — Score matrix + probabilistic forecasting.**
 
 Everything else in the roadmap (forecasting models, ensembling, calibration,
 drift monitoring, auth, full dashboard) is **not yet implemented**. The
@@ -51,6 +52,11 @@ uvicorn app.api.main:app --reload
 #       GET  http://127.0.0.1:8000/models?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/league-parameters?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/teams/mock:MT-01/strength
+#       POST http://127.0.0.1:8000/forecast?fixture=mock:MOCK-D1:2026:003
+#       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003
+#       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003/distribution
+
+python scripts/generate_forecasts.py --competition mock:MOCK-D1 --limit 5
 ```
 
 Run tests:
@@ -94,7 +100,7 @@ changes.
 ```
 app/
   api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
-                  models, league-parameters, team-strength, sync)
+                  models, league-parameters, team-strength, forecast/predictions, sync)
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -103,6 +109,9 @@ app/
     models/       ORM models for every table in the target schema (see below)
   models/
     goal_model.py              shared Dixon-Coles / Poisson-baseline MLE engine
+  forecasting/
+    score_matrix.py             score matrix + every probability derived from it,
+                                 plus the section-29 consistency checker
   services/
     identifiers.py             canonical "<provider>:<native_id>" ID scheme
     enum_utils.py               defensive provider-string -> enum parsing
@@ -117,15 +126,17 @@ app/
     model_eligibility.py        which models can run for a competition, and why not (section 17)
     model_training.py           fits/persists Dixon-Coles + Poisson per competition
     team_strength.py            per-team attack/defence/home/away/recent strength snapshots
+    forecast_service.py         quality gate -> score matrix -> prediction registry (section 61)
     sync_orchestrator.py        wires all of the above into one full-sync run
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
 
 migrations/       Alembic, wired to app.config + app.database.models
-scripts/          CLI entry points (init_db, sync_competitions, sync_all)
+scripts/          CLI entry points (init_db, sync_competitions, sync_all, generate_forecasts)
 tests/            pytest suite (providers, discovery, team mapping, fixture sync,
                   movement detection, data quality, goal-model MLE, model training,
-                  league parameters, full-sync orchestration, DB constraints)
+                  league parameters, score matrix, forecast service, full-sync
+                  orchestration, DB constraints)
 ```
 
 ### Database
@@ -218,12 +229,61 @@ sample size — when a season has fewer than `league_shrinkage_min_sample`
 results. This is a first, pragmatic pass at section 16's "hierarchical
 shrinkage," not yet the fuller partial-pooling model in section 22.
 
+### Score matrix and probabilistic forecasting (Phase 4)
+
+`ForecastService` (`app/services/forecast_service.py`) turns a fitted model
+into an actual forecast for one fixture, and registers it:
+
+1. **Quality gate** (section 61) — before anything is computed: an ENABLED
+   `dixon_coles` model must exist for the competition and have converged;
+   both teams must appear in its trained parameters (otherwise the fixture
+   is flagged `ood_status=True` — a team the model has never seen); the
+   fixture's kickoff must be *after* the model's training window ends
+   (otherwise it's flagged as a possible leakage case); and the
+   competition's latest data-quality status must not be `INSUFFICIENT`.
+   Any failure sets `FORECAST STATUS = FAILED_VALIDATION` — never silently
+   published as if it were a normal forecast.
+2. **Score matrix** (`app/forecasting/score_matrix.py`, section 25) — built
+   from the Dixon-Coles fit, auto-expanding the goal grid if the truncated
+   tail probability is still significant, then normalized to sum to
+   exactly 1.
+3. **Everything derived from that one matrix** (sections 26-30): the top-N
+   most-probable scorelines (never called "guaranteed"), outcome
+   probabilities (home/draw/away), a goal distribution (0/1/2/3/4+, plus
+   expected/median/mode/variance of total goals), over/under lines, BTTS
+   and clean-sheet probabilities. A consistency checker (section 29) then
+   verifies the matrix sums to 1, outcome probabilities sum to 1, and the
+   over/under lines are monotonically decreasing — a failure here also
+   forces `FAILED_VALIDATION` rather than publishing something incoherent.
+4. **First-pass uncertainty and disagreement** (sections 38-39) — aleatoric
+   uncertainty as `sqrt(expected_home_goals + expected_away_goals)` (a
+   Poisson-scale proxy for intrinsic match randomness), epistemic
+   uncertainty from the two teams' `TeamStrength.uncertainty`, and, when
+   the Poisson baseline is also enabled, a LOW/MEDIUM/HIGH disagreement
+   level from how far its outcome probabilities diverge from Dixon-Coles's.
+   A forecast with no supporting model to compare against is labelled
+   `LIMITED` rather than `ACTIVE` — full ensemble/calibration is Phase 6.
+5. **Prediction registry + pre-match snapshot** (sections 46-47) — every
+   call to `POST /forecast` inserts a *new* `Prediction` row (never
+   overwrites) with a fresh UUID, the model/dataset/feature/software
+   versions used, and a `PredictionSnapshot` freezing the exact attack/
+   defence/home-advantage values used, so a forecast can always be
+   reproduced or audited later — including failed ones, as long as a model
+   existed to reference (a fixture with literally no model at all can't
+   satisfy the schema's `NOT NULL` model reference, so that one edge case
+   is logged as a system event instead of a broken row).
+
+`GET /predictions/{fixture}` reads the latest registered prediction;
+`GET /predictions/{fixture}/distribution` returns the raw score matrix and
+goal distribution; `POST /forecast?fixture=...` (re)generates one.
+First-half/corners/cards forecasts and full ensemble weighting are Phase 5/6.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
 2. **Historical data ingestion + validation + team mapping** — done
 3. **Dixon–Coles + Poisson + dynamic strength models** — done
-4. Score matrix + probabilistic forecasting
+4. **Score matrix + probabilistic forecasting** — done
 5. xG + hierarchical + additional models (corners, cards, first-half)
 6. Ensemble + calibration + uncertainty
 7. Walk-forward backtesting + model evaluation
@@ -240,5 +300,6 @@ shrinkage," not yet the fuller partial-pooling model in section 22.
   summary of a distribution, not the distribution itself.
 - Never fabricate data (e.g. xG) a provider doesn't actually supply — report
   it as unavailable and disable the models that depend on it.
-- Every prediction (once Phase 4+ lands) is expected to be traceable to the
-  exact data snapshot, model version and configuration that produced it.
+- Every prediction is traceable to the exact data snapshot, model version
+  and configuration that produced it (the prediction registry + pre-match
+  snapshot, sections 46-47).
