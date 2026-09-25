@@ -1,0 +1,29 @@
+[
+  {
+    "competition_id": "MOCK-D1",
+    "competition_name": "Noeo Mock Division One",
+    "country": "Mockland",
+    "region": "Mockland",
+    "competition_type": "DOMESTIC_LEAGUE",
+    "division_level": 1,
+    "competition_format": "SINGLE_ROUND_ROBIN",
+    "number_of_teams": 6,
+    "seasons": [
+      {"season_id": "2024", "name": "2024", "start_date": "2024-08-01", "end_date": "2025-05-31", "status": "FINISHED"},
+      {"season_id": "2026", "name": "2026", "start_date": "2026-08-01", "end_date": "2027-05-31", "status": "ACTIVE"}
+    ]
+  },
+  {
+    "competition_id": "MOCK-D2",
+    "competition_name": "Noeo Mock Division Two",
+    "country": "Mockland",
+    "region": "Mockland",
+    "competition_type": "DOMESTIC_LEAGUE",
+    "division_level": 2,
+    "competition_format": "SINGLE_ROUND_ROBIN",
+    "number_of_teams": 4,
+    "seasons": [
+      {"season_id": "2026", "name": "2026", "start_date": "2026-08-01", "end_date": "2027-05-31", "status": "ACTIVE"}
+    ]
+  }
+]

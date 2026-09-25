@@ -1,0 +1,12 @@
+{
+  "MT-01": {"name": "Mockland Athletic", "country": "Mockland"},
+  "MT-02": {"name": "Northside United", "country": "Mockland"},
+  "MT-03": {"name": "Riverside FC", "country": "Mockland"},
+  "MT-04": {"name": "Harbour City", "country": "Mockland"},
+  "MT-05": {"name": "Eastgate Rovers", "country": "Mockland"},
+  "MT-06": {"name": "Westfield Town", "country": "Mockland"},
+  "MT-07": {"name": "Lowland Wanderers", "country": "Mockland"},
+  "MT-08": {"name": "Hillcrest Albion", "country": "Mockland"},
+  "MT-09": {"name": "Portside Rangers", "country": "Mockland"},
+  "MT-10": {"name": "Millbrook City", "country": "Mockland"}
+}
