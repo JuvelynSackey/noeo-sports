@@ -24,7 +24,15 @@ def test_full_sync_trains_models_for_data_rich_competition_and_disables_for_spar
         enabled_by_competition.setdefault(v.competition_id, set()).add(v.model_name)
 
     d1_competition_id = next(iter(v.competition_id for v in db_session.query(ModelVersion).all() if v.version == d1_training.dixon_coles_version))
-    assert enabled_by_competition[d1_competition_id] == {"dixon_coles", "poisson_baseline"}
+    # D1 has enough goal AND corners/cards/first-half data for every Phase 3+5 model.
+    assert enabled_by_competition[d1_competition_id] == {
+        "dixon_coles",
+        "poisson_baseline",
+        "hierarchical_model",
+        "first_half_model",
+        "corners_model",
+        "cards_model",
+    }
 
 
 def test_rerunning_full_sync_retires_the_previous_model_version(db_session):

@@ -235,6 +235,22 @@ class AdministratorNotesOut(BaseModel):
     errors: list[str]
 
 
+class FirstHalfForecastOut(BaseModel):
+    expected_goals_home: float
+    expected_goals_away: float
+    expected_goals_total: float
+    most_probable_score: ScorelineOut
+
+
+class RateMarketForecastOut(BaseModel):
+    """Corners/cards (sections 32-33): expected counts only, no full score
+    matrix — the spec's own output format only asks for Home/Away/Total here."""
+
+    expected_home: float
+    expected_away: float
+    expected_total: float
+
+
 class MatchForecastOut(BaseModel):
     """MASTER BUILD PROMPT section 62 output format. `most_probable_scorelines`
     are exactly that — a summary of the score matrix, never a guarantee."""
@@ -251,6 +267,9 @@ class MatchForecastOut(BaseModel):
     most_probable_scorelines: list[ScorelineOut]
     outcome_distribution: OutcomeDistributionOut | None
     goal_distribution: GoalDistributionOut | None
+    first_half: FirstHalfForecastOut | None
+    corners: RateMarketForecastOut | None
+    cards: RateMarketForecastOut | None
     model_diagnostics: ModelDiagnosticsOut
     model_information: ModelInformationOut
     administrator_notes: AdministratorNotesOut

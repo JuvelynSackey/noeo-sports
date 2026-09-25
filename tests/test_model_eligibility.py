@@ -41,3 +41,33 @@ def test_disabled_with_fewer_than_two_teams():
 
     assert not report.dixon_coles.eligible
     assert "fewer than 2 teams" in report.dixon_coles.reason
+
+
+def test_hierarchical_model_mirrors_dixon_coles_eligibility():
+    service = ModelEligibilityService(_settings(min_matches_for_model_fit=10))
+    enabled = service.evaluate(n_matches=20, n_teams=6, match_date_span_days=90)
+    assert enabled.hierarchical_model.eligible
+
+    disabled = service.evaluate(n_matches=5, n_teams=6, match_date_span_days=90)
+    assert not disabled.hierarchical_model.eligible
+
+
+def test_evaluate_market_generic_threshold():
+    service = ModelEligibilityService(_settings(min_matches_for_model_fit=10))
+
+    ok = service.evaluate_market(n_matches=12, n_teams=4, market_label="corners_model")
+    assert ok.eligible and ok.reason is None
+
+    too_few_matches = service.evaluate_market(n_matches=3, n_teams=4, market_label="corners_model")
+    assert not too_few_matches.eligible
+    assert "insufficient corners_model data" in too_few_matches.reason
+
+    too_few_teams = service.evaluate_market(n_matches=12, n_teams=1, market_label="cards_model")
+    assert not too_few_teams.eligible
+    assert "fewer than 2 teams with cards_model data" in too_few_teams.reason
+
+
+def test_evaluate_market_accepts_custom_threshold():
+    service = ModelEligibilityService(_settings(min_matches_for_model_fit=10))
+    result = service.evaluate_market(n_matches=6, n_teams=4, market_label="xG", threshold=5)
+    assert result.eligible

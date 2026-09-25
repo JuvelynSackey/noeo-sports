@@ -1,9 +1,10 @@
 """Full synchronization pipeline — MASTER BUILD PROMPT section 51 (steps
-1-11 of that list; calibration/forecast generation, steps 12+, land in
-Phase 4+). Wires together: discover competitions/seasons -> map teams ->
-sync fixtures/results/statistics/xG -> detect promotion/relegation ->
-score data quality -> calculate league baselines -> evaluate model
-eligibility -> train Dixon-Coles/Poisson/team-strength models.
+1-11 of that list; ensemble/calibration land in Phase 6). Wires together:
+discover competitions/seasons -> map teams -> sync fixtures/results/
+statistics/xG -> detect promotion/relegation -> score data quality ->
+calculate league baselines -> evaluate model eligibility -> train Dixon-
+Coles/Poisson/hierarchical/team-strength models -> train the independent
+first-half/corners/cards/xG models (Phase 5).
 """
 from __future__ import annotations
 
@@ -21,9 +22,11 @@ from app.services.competition_discovery import CompetitionDiscoveryReport, Compe
 from app.services.data_quality import DataQualityService
 from app.services.fixture_sync import FixtureSyncService
 from app.services.league_parameters import LeagueParameterService
+from app.services.market_models import MarketModelTrainingService
 from app.services.model_training import ModelTrainingReport, ModelTrainingService
 from app.services.movement_detection import MovementDetectionService, MovementReport
 from app.services.team_mapping import TeamMappingService
+from app.services.xg_model import XGModelService
 
 logger = get_logger(__name__)
 
@@ -123,7 +126,13 @@ class FullSyncService:
 
             LeagueParameterService(self.db).compute(competition, season)
 
-        # Model training aggregates across every season currently synced for this
-        # competition (see ModelTrainingService), so it runs once per competition
-        # rather than inside the per-season loop above.
+        # Model training (and the additional-market models below) aggregate
+        # across every season currently synced for this competition, so they
+        # run once per competition rather than inside the per-season loop above.
         report.model_training[competition.canonical_competition_id] = ModelTrainingService(self.db).train(competition)
+
+        market_service = MarketModelTrainingService(self.db)
+        market_service.train_first_half(competition)
+        market_service.train_corners(competition)
+        market_service.train_cards(competition)
+        XGModelService(self.db).train(competition)

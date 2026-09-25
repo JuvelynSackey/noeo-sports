@@ -24,6 +24,7 @@ from app.api.schemas import (
     DataQualityOut,
     DiscoveryReportOut,
     ExpectedGoalsOut,
+    FirstHalfForecastOut,
     FixtureOut,
     GoalDistributionOut,
     LeagueParameterOut,
@@ -34,6 +35,7 @@ from app.api.schemas import (
     ModelVersionSummaryOut,
     MovementReportOut,
     OutcomeDistributionOut,
+    RateMarketForecastOut,
     ScorelineOut,
     SyncReportOut,
     SystemHealthOut,
@@ -350,6 +352,19 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
             supporting.append(sibling.model_name)
 
     validation = prediction.validation_report or {}
+    supplementary = prediction.supplementary_markets or {}
+
+    first_half_out = None
+    if "first_half" in supplementary:
+        fh = supplementary["first_half"]
+        first_half_out = FirstHalfForecastOut(
+            expected_goals_home=fh["expected_goals_home"],
+            expected_goals_away=fh["expected_goals_away"],
+            expected_goals_total=fh["expected_goals_total"],
+            most_probable_score=ScorelineOut(**fh["most_probable_score"]),
+        )
+    corners_out = RateMarketForecastOut(**supplementary["corners"]) if "corners" in supplementary else None
+    cards_out = RateMarketForecastOut(**supplementary["cards"]) if "cards" in supplementary else None
 
     return MatchForecastOut(
         prediction_id=prediction.prediction_id,
@@ -372,6 +387,9 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
         most_probable_scorelines=[ScorelineOut(**s) for s in scorelines],
         outcome_distribution=outcome_out,
         goal_distribution=goal_distribution_out,
+        first_half=first_half_out,
+        corners=corners_out,
+        cards=cards_out,
         model_diagnostics=ModelDiagnosticsOut(
             model_disagreement=prediction.model_disagreement_level.value
             if hasattr(prediction.model_disagreement_level, "value")

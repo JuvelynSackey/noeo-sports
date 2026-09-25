@@ -35,6 +35,7 @@ from app.forecasting.score_matrix import (
 )
 from app.logging_config import get_logger
 from app.models.goal_model import GoalModel, GoalModelFit
+from app.services.market_models import CARDS_MODEL, CORNERS_MODEL, FIRST_HALF_MODEL
 from app.services.model_training import DIXON_COLES, POISSON_BASELINE
 
 logger = get_logger(__name__)
@@ -66,6 +67,7 @@ class ForecastResult:
     dataset_version: str | None = None
     predicted_at: dt.datetime | None = None
     warnings: list[str] = field(default_factory=list)
+    supplementary_markets: dict = field(default_factory=dict)
 
 
 def _fit_from_model_version(mv: ModelVersion) -> GoalModelFit:
@@ -224,7 +226,73 @@ class ForecastService:
         if not result.supporting_models:
             forecast_status = ForecastStatus.LIMITED  # no cross-model disagreement signal yet
 
+        # --- Additional markets (sections 31-33) — independently eligible,
+        # non-blocking: an unavailable one is just missing from the output,
+        # never a reason to fail the main goals-based forecast.
+        supplementary: dict = {}
+        first_half = self._first_half_market(competition, home_id, away_id, warnings)
+        if first_half is not None:
+            supplementary["first_half"] = first_half
+        corners = self._rate_market(competition, home_id, away_id, CORNERS_MODEL, warnings)
+        if corners is not None:
+            supplementary["corners"] = corners
+        cards = self._rate_market(competition, home_id, away_id, CARDS_MODEL, warnings)
+        if cards is not None:
+            supplementary["cards"] = cards
+        result.supplementary_markets = supplementary
+
         return self._finalize(result, errors, warnings, champion, fit, forecast_status, score, home_team, away_team)
+
+    def _latest_enabled(self, competition: Competition, model_name: str) -> ModelVersion | None:
+        return (
+            self.db.query(ModelVersion)
+            .filter_by(model_name=model_name, competition_id=competition.id, status="ENABLED")
+            .order_by(ModelVersion.trained_at.desc())
+            .first()
+        )
+
+    def _first_half_market(self, competition: Competition, home_id: str, away_id: str, warnings: list[str]) -> dict | None:
+        mv = self._latest_enabled(competition, FIRST_HALF_MODEL)
+        if mv is None:
+            warnings.append(f"{FIRST_HALF_MODEL} unavailable for this competition")
+            return None
+        fit = _fit_from_model_version(mv)
+        if home_id not in fit.attack or away_id not in fit.attack:
+            warnings.append(f"{FIRST_HALF_MODEL} unavailable for these teams (not in its training data)")
+            return None
+
+        model = GoalModel(use_dc_adjustment=True)
+        score = build_score_matrix(
+            model,
+            fit,
+            home_id,
+            away_id,
+            initial_max_goals=self.settings.score_matrix_initial_max_goals,
+            tail_threshold=self.settings.score_matrix_tail_threshold,
+            max_goals_cap=self.settings.score_matrix_max_goals_cap,
+        )
+        lam_h, lam_a = model.expected_goals(fit, home_id, away_id)
+        top = most_probable_scorelines(score.matrix, top_n=1)[0]
+        return {
+            "expected_goals_home": lam_h,
+            "expected_goals_away": lam_a,
+            "expected_goals_total": lam_h + lam_a,
+            "most_probable_score": top,
+        }
+
+    def _rate_market(self, competition: Competition, home_id: str, away_id: str, model_name: str, warnings: list[str]) -> dict | None:
+        mv = self._latest_enabled(competition, model_name)
+        if mv is None:
+            warnings.append(f"{model_name} unavailable for this competition")
+            return None
+        fit = _fit_from_model_version(mv)
+        if home_id not in fit.attack or away_id not in fit.attack:
+            warnings.append(f"{model_name} unavailable for these teams (not in its training data)")
+            return None
+
+        model = GoalModel(use_dc_adjustment=False)
+        lam_h, lam_a = model.expected_goals(fit, home_id, away_id)
+        return {"expected_home": lam_h, "expected_away": lam_a, "expected_total": lam_h + lam_a}
 
     def _disagreement(self, champion_fit, champion_mv, supporting_mv, home_id, away_id, champion_outcomes) -> str:
         supporting_fit = _fit_from_model_version(supporting_mv)
@@ -312,6 +380,7 @@ class ForecastService:
             data_quality_score=result.data_quality_score,
             model_disagreement_level=result.model_disagreement_level,
             ood_status=result.ood_status,
+            supplementary_markets=result.supplementary_markets or None,
         )
 
         # model_version_id is NOT NULL in the schema; a forecast that fails

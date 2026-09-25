@@ -79,6 +79,40 @@ def test_full_sync_then_forecast_is_active_and_consistent(db_session):
     assert stored.forecast_status == ForecastStatus.ACTIVE
     assert stored.score_matrix["matrix"]
 
+    # MOCK-D1 has enough data for all Phase 5 markets too.
+    assert set(result.supplementary_markets) == {"first_half", "corners", "cards"}
+    assert stored.supplementary_markets and set(stored.supplementary_markets) == {"first_half", "corners", "cards"}
+    fh = result.supplementary_markets["first_half"]
+    assert fh["expected_goals_total"] > 0
+    assert "most_probable_score" in fh
+    assert result.supplementary_markets["corners"]["expected_total"] > 0
+    assert result.supplementary_markets["cards"]["expected_total"] > 0
+
+
+def test_missing_supplementary_markets_degrade_gracefully(db_session):
+    # Only the main goals models exist — no first-half/corners/cards ModelVersion rows.
+    competition = _competition("prov:NOMARKETS")
+    db_session.add(competition)
+    db_session.commit()
+    season = _season(competition, "2025")
+    db_session.add(season)
+    db_session.commit()
+    a, b = _team(db_session, "prov:A"), _team(db_session, "prov:B")
+    db_session.add(_model_version(competition, "dixon_coles", {"prov:A": 0.1, "prov:B": -0.1}, {"prov:A": 0.0, "prov:B": 0.0}))
+    db_session.add(_model_version(competition, "poisson_baseline", {"prov:A": 0.1, "prov:B": -0.1}, {"prov:A": 0.0, "prov:B": 0.0}))
+    db_session.commit()
+    fixture = _fixture(competition, season, a, b, "F8")
+    db_session.add(fixture)
+    db_session.commit()
+
+    result = ForecastService(db_session).generate(fixture)
+
+    assert result.forecast_status in (ForecastStatus.ACTIVE, ForecastStatus.LIMITED)
+    assert result.supplementary_markets == {}
+    assert any("first_half_model unavailable" in w for w in result.warnings)
+    assert any("corners_model unavailable" in w for w in result.warnings)
+    assert any("cards_model unavailable" in w for w in result.warnings)
+
 
 def test_repeated_forecasts_never_overwrite_the_registry(db_session):
     FullSyncService(db_session, MockProvider()).run()

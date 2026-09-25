@@ -1,9 +1,12 @@
-"""Dynamic team-strength snapshots — MASTER BUILD PROMPT section 21.
+"""Dynamic team-strength snapshots — MASTER BUILD PROMPT sections 21 and 22.
 
 Populates one `TeamStrength` row per team per competition per run:
-- attack_strength / defence_strength: the primary (undecayed) Dixon-Coles
-  fit's parameters — the joint MLE across all of a team's matches, which is
-  already opponent-adjusted by construction.
+- attack_strength / defence_strength: the *hierarchically-shrunk* Dixon-Coles
+  parameters (`app/services/hierarchical_shrinkage.py`, section 22) rather
+  than the raw MLE — a team with few matches played is pulled toward the
+  competition average, which degrades more gracefully for newly promoted
+  teams and sparse leagues than trusting a handful of matches outright. The
+  raw, unshrunk numbers remain available via the `dixon_coles` ModelVersion.
 - opponent_adjusted_strength: attack - defence, a single net-rating summary.
 - home_strength / away_strength: simple empirical average goal difference
   when playing home/away respectively — deliberately independent of the
@@ -12,13 +15,14 @@ Populates one `TeamStrength` row per team per competition per run:
   (see `app/services/model_training.py`), so it can diverge from the
   season-long `attack_strength` when a team's current form differs from
   its full-history rating.
-- uncertainty: the primary fit's asymptotic standard error for that team's
-  attack parameter (see `GoalModel._estimate_standard_errors`).
+- uncertainty: the raw (unshrunk) fit's asymptotic standard error for that
+  team's attack parameter (see `GoalModel._estimate_standard_errors`) —
+  shrinkage itself has no standard error to report, so this still reflects
+  the underlying MLE's confidence.
 
-This is a pragmatic first implementation of section 21, not yet the
-state-space/Kalman/dynamic-hierarchical model the spec lists as an option —
-that's a natural future upgrade once enough historical snapshots exist to
-validate one against.
+This is a pragmatic first implementation, not yet the state-space/Kalman/
+dynamic-hierarchical model section 21 lists as an option — that's a natural
+future upgrade once enough historical snapshots exist to validate one against.
 """
 from __future__ import annotations
 
@@ -43,9 +47,12 @@ class TeamStrengthService:
         competition: Competition,
         primary_fit: GoalModelFit,
         recent_fit: GoalModelFit | None,
+        uncertainty_fit: GoalModelFit | None = None,
+        games_played: dict[str, int] | None = None,
         as_of: dt.datetime | None = None,
     ) -> list[TeamStrength]:
         as_of = as_of or dt.datetime.now(dt.timezone.utc)
+        uncertainty_fit = uncertainty_fit or primary_fit
         home_away_splits = self._home_away_splits(competition)
 
         rows: list[TeamStrength] = []
@@ -69,9 +76,9 @@ class TeamStrengthService:
             record.home_strength = split[0]
             record.away_strength = split[1]
             record.recent_strength = recent_fit.attack.get(canonical_team_id) if recent_fit else None
-            record.uncertainty = primary_fit.attack_se.get(canonical_team_id)
+            record.uncertainty = uncertainty_fit.attack_se.get(canonical_team_id)
             record.method = "dixon_coles"
-            record.shrinkage_source = None
+            record.shrinkage_source = f"hierarchical:games_played={games_played.get(canonical_team_id)}" if games_played else None
             record.extra = {
                 "home_advantage": primary_fit.home_advantage,
                 "rho": primary_fit.rho,

@@ -1,5 +1,5 @@
 """Fits and persists the Dixon-Coles and Poisson-baseline models for a
-competition — MASTER BUILD PROMPT sections 17, 18, 19, 21.
+competition — MASTER BUILD PROMPT sections 17, 18, 19, 21, 22.
 
 Uses whatever completed results are already in the database for the
 competition (scope is set upstream by `FixtureSyncService`/`FullSyncService`:
@@ -7,23 +7,27 @@ the current season plus the single most recent finished one). The primary
 fit is undecayed (uniform weight across that whole window); a second,
 time-decayed fit over the same matches feeds only `TeamStrength.recent_strength`
 so "season-long ability" and "current form" stay visibly distinct signals.
+A third, hierarchically-shrunk fit (section 22) is persisted separately as
+`hierarchical_model` and is what `TeamStrength.attack_strength`/
+`defence_strength` actually use, since it degrades more gracefully for
+teams with few matches played than the raw MLE does.
 """
 from __future__ import annotations
 
 import datetime as dt
-import uuid
 from dataclasses import dataclass
 
 from sqlalchemy.orm import Session
 
 from app.config import Settings, get_settings
 from app.database.models.competitions import Competition
-from app.database.models.enums import FixtureStatus, ModelStatus
+from app.database.models.enums import FixtureStatus
 from app.database.models.fixtures import Fixture, Result
-from app.database.models.modeling import ModelVersion
 from app.database.models.teams import Team
 from app.logging_config import get_logger
 from app.models.goal_model import GoalMatchRecord, GoalModel, GoalModelFit
+from app.services import model_version_registry as registry
+from app.services.hierarchical_shrinkage import shrink_fit
 from app.services.model_eligibility import EligibilityReport, ModelEligibilityService
 from app.services.team_strength import TeamStrengthService
 
@@ -31,6 +35,7 @@ logger = get_logger(__name__)
 
 DIXON_COLES = "dixon_coles"
 POISSON_BASELINE = "poisson_baseline"
+HIERARCHICAL_MODEL = "hierarchical_model"
 
 
 @dataclass
@@ -39,6 +44,7 @@ class ModelTrainingReport:
     eligibility: EligibilityReport
     dixon_coles_version: str | None = None
     poisson_version: str | None = None
+    hierarchical_version: str | None = None
     n_matches: int = 0
     n_teams: int = 0
     team_strength_rows: int = 0
@@ -74,8 +80,9 @@ class ModelTrainingService:
         )
 
         if not eligibility.dixon_coles.eligible:
-            self._retire_and_disable(DIXON_COLES, competition, eligibility.dixon_coles.reason)
-            self._retire_and_disable(POISSON_BASELINE, competition, eligibility.poisson_baseline.reason)
+            registry.record_disabled(self.db, DIXON_COLES, competition, eligibility.dixon_coles.reason)
+            registry.record_disabled(self.db, POISSON_BASELINE, competition, eligibility.poisson_baseline.reason)
+            registry.record_disabled(self.db, HIERARCHICAL_MODEL, competition, eligibility.dixon_coles.reason)
             report.skipped_reason = eligibility.dixon_coles.reason
             return report
 
@@ -87,14 +94,25 @@ class ModelTrainingService:
             GoalMatchRecord(index_of[f.home_team_id], index_of[f.away_team_id], r.home_goals, r.away_goals)
             for f, r in completed
         ]
+        kickoff_window = (min(kickoffs) if kickoffs else None, max(kickoffs) if kickoffs else None)
 
         dc_model = GoalModel(use_dc_adjustment=True, l2_regularization=self.settings.model_l2_regularization)
         dc_fit = dc_model.fit(team_ids, matches, estimate_uncertainty=True)
-        report.dixon_coles_version = self._persist_model_version(DIXON_COLES, competition, dc_fit, completed)
+        report.dixon_coles_version = registry.persist_goal_fit(
+            self.db, self.settings, DIXON_COLES, competition, dc_fit, *kickoff_window, use_dc_adjustment=True
+        )
 
         poisson_model = GoalModel(use_dc_adjustment=False, l2_regularization=self.settings.model_l2_regularization)
         poisson_fit = poisson_model.fit(team_ids, matches)
-        report.poisson_version = self._persist_model_version(POISSON_BASELINE, competition, poisson_fit, completed)
+        report.poisson_version = registry.persist_goal_fit(
+            self.db, self.settings, POISSON_BASELINE, competition, poisson_fit, *kickoff_window, use_dc_adjustment=False
+        )
+
+        games_played = self._games_played(team_ids, completed, teams_by_id)
+        hierarchical_fit = shrink_fit(dc_fit, games_played, self.settings)
+        report.hierarchical_version = registry.persist_goal_fit(
+            self.db, self.settings, HIERARCHICAL_MODEL, competition, hierarchical_fit, *kickoff_window, use_dc_adjustment=True
+        )
 
         recent_fit: GoalModelFit | None = None
         if eligibility.dynamic_strength.eligible:
@@ -106,9 +124,18 @@ class ModelTrainingService:
                 reason=eligibility.dynamic_strength.reason,
             )
 
-        strength_rows = TeamStrengthService(self.db).compute(competition, dc_fit, recent_fit)
+        strength_rows = TeamStrengthService(self.db).compute(
+            competition, hierarchical_fit, recent_fit, uncertainty_fit=dc_fit, games_played=games_played
+        )
         report.team_strength_rows = len(strength_rows)
         return report
+
+    def _games_played(self, team_ids: list[str], completed, teams_by_id: dict[int, Team]) -> dict[str, int]:
+        counts: dict[str, int] = {tid: 0 for tid in team_ids}
+        for f, _ in completed:
+            counts[teams_by_id[f.home_team_id].canonical_team_id] += 1
+            counts[teams_by_id[f.away_team_id].canonical_team_id] += 1
+        return counts
 
     def _apply_time_decay(self, matches: list[GoalMatchRecord], completed) -> list[GoalMatchRecord]:
         now = dt.datetime.now(dt.timezone.utc)
@@ -125,73 +152,3 @@ class ModelTrainingService:
                 weight = 0.5 ** (age_days / half_life)
             decayed.append(GoalMatchRecord(match.home_index, match.away_index, match.home_goals, match.away_goals, weight))
         return decayed
-
-    def _persist_model_version(self, model_name: str, competition: Competition, fit: GoalModelFit, completed) -> str:
-        self._retire_active(model_name, competition)
-
-        kickoffs = [f.kickoff_utc for f, _ in completed if f.kickoff_utc is not None]
-        version = uuid.uuid4().hex[:12]
-        model_version = ModelVersion(
-            model_name=model_name,
-            version=version,
-            status=ModelStatus.ENABLED,
-            competition_id=competition.id,
-            trained_at=dt.datetime.now(dt.timezone.utc),
-            training_window_start=min(kickoffs) if kickoffs else None,
-            training_window_end=max(kickoffs) if kickoffs else None,
-            hyperparameters={
-                "l2_regularization": self.settings.model_l2_regularization,
-                "use_dc_adjustment": model_name == DIXON_COLES,
-            },
-            parameters={
-                "attack": fit.attack,
-                "defence": fit.defence,
-                "home_advantage": fit.home_advantage,
-                "rho": fit.rho,
-                "team_ids": fit.team_ids,
-            },
-            evaluation_metrics={
-                "log_likelihood": fit.log_likelihood,
-                "aic": fit.aic,
-                "n_matches": fit.n_matches,
-                "n_params": fit.n_params,
-                "converged": fit.converged,
-            },
-            is_reproducible=True,
-        )
-        self.db.add(model_version)
-        self.db.commit()
-        return version
-
-    def _retire_active(self, model_name: str, competition: Competition) -> None:
-        active = (
-            self.db.query(ModelVersion)
-            .filter_by(model_name=model_name, competition_id=competition.id, status=ModelStatus.ENABLED)
-            .all()
-        )
-        for m in active:
-            m.status = ModelStatus.RETIRED
-        if active:
-            self.db.commit()
-
-    def _retire_and_disable(self, model_name: str, competition: Competition, reason: str | None) -> None:
-        self._retire_active(model_name, competition)
-        existing_disabled = (
-            self.db.query(ModelVersion)
-            .filter_by(model_name=model_name, competition_id=competition.id, status=ModelStatus.DISABLED)
-            .first()
-        )
-        if existing_disabled:
-            existing_disabled.disabled_reason = reason
-            self.db.commit()
-            return
-        self.db.add(
-            ModelVersion(
-                model_name=model_name,
-                version=uuid.uuid4().hex[:12],
-                status=ModelStatus.DISABLED,
-                disabled_reason=reason,
-                competition_id=competition.id,
-            )
-        )
-        self.db.commit()

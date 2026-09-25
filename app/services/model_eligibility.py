@@ -1,11 +1,14 @@
 """Model Eligibility Engine — MASTER BUILD PROMPT section 17.
 
-Determines which models can operate for a competition and records *why*
-when one can't ("Dixon-Coles: ENABLED" / "xG Model: DISABLED — xG
-unavailable"). Only the models implemented so far (Phase 3: Dixon-Coles,
-the Poisson baseline, and dynamic team strength) are evaluated here; later
-phases add xG/corners/cards/ML entries to this same engine rather than
-building a separate one.
+The single place that decides which models can run for a competition and
+records *why not* when one can't ("Dixon-Coles: ENABLED" / "xG Model:
+DISABLED — xG unavailable"). `evaluate()` covers the goal-based models
+(Dixon-Coles, Poisson baseline, dynamic strength, and the hierarchical
+shrinkage that rides on the same fit); `evaluate_market()` is the same
+sample-size/team-count logic generalized for the independent markets added
+in Phase 5 (xG, first-half, corners, cards) so every model's eligibility
+reason is generated in one place rather than re-implemented per training
+service.
 """
 from __future__ import annotations
 
@@ -25,6 +28,7 @@ class EligibilityReport:
     dixon_coles: EligibilityResult
     poisson_baseline: EligibilityResult
     dynamic_strength: EligibilityResult
+    hierarchical_model: EligibilityResult
 
 
 class ModelEligibilityService:
@@ -36,12 +40,12 @@ class ModelEligibilityService:
 
         if n_teams < 2:
             insufficient_teams = EligibilityResult(False, f"fewer than 2 teams with results (n_teams={n_teams})")
-            return EligibilityReport(insufficient_teams, insufficient_teams, insufficient_teams)
+            return EligibilityReport(insufficient_teams, insufficient_teams, insufficient_teams, insufficient_teams)
 
         if n_matches < threshold:
             reason = f"insufficient completed results ({n_matches} < {threshold})"
             insufficient = EligibilityResult(False, reason)
-            return EligibilityReport(insufficient, insufficient, insufficient)
+            return EligibilityReport(insufficient, insufficient, insufficient, insufficient)
 
         goal_models_ok = EligibilityResult(True, None)
 
@@ -53,4 +57,20 @@ class ModelEligibilityService:
         else:
             dynamic = EligibilityResult(True, None)
 
-        return EligibilityReport(dixon_coles=goal_models_ok, poisson_baseline=goal_models_ok, dynamic_strength=dynamic)
+        return EligibilityReport(
+            dixon_coles=goal_models_ok,
+            poisson_baseline=goal_models_ok,
+            dynamic_strength=dynamic,
+            hierarchical_model=goal_models_ok,  # rides on the same fit as dixon_coles
+        )
+
+    def evaluate_market(self, n_matches: int, n_teams: int, market_label: str, threshold: int | None = None) -> EligibilityResult:
+        """Generic sample-size gate for an independent market (xG, first-half,
+        corners, cards) that has its own data availability separate from the
+        main goals dataset."""
+        threshold = threshold if threshold is not None else self.settings.min_matches_for_model_fit
+        if n_teams < 2:
+            return EligibilityResult(False, f"fewer than 2 teams with {market_label} data (n_teams={n_teams})")
+        if n_matches < threshold:
+            return EligibilityResult(False, f"insufficient {market_label} data ({n_matches} < {threshold})")
+        return EligibilityResult(True, None)

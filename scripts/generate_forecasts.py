@@ -60,6 +60,31 @@ def _print_forecast(db, fixture: Fixture, result) -> None:
     print("GOAL DISTRIBUTION")
     for label in ("0", "1", "2", "3", "4_plus"):
         print(f"{label}: {result.goal_distribution['buckets'][label]:.1%}")
+
+    first_half = result.supplementary_markets.get("first_half")
+    if first_half:
+        print()
+        print("FIRST-HALF FORECAST")
+        print(f"Expected First-Half Goals: {first_half['expected_goals_total']:.2f}")
+        s = first_half["most_probable_score"]
+        print(f"Most-Probable First-Half Score: {s['home_goals']}-{s['away_goals']} ({s['probability']:.1%})")
+
+    corners = result.supplementary_markets.get("corners")
+    if corners:
+        print()
+        print("CORNERS")
+        print(f"Expected Home: {corners['expected_home']:.2f}")
+        print(f"Expected Away: {corners['expected_away']:.2f}")
+        print(f"Expected Total: {corners['expected_total']:.2f}")
+
+    cards = result.supplementary_markets.get("cards")
+    if cards:
+        print()
+        print("CARDS")
+        print(f"Expected Home: {cards['expected_home']:.2f}")
+        print(f"Expected Away: {cards['expected_away']:.2f}")
+        print(f"Expected Total: {cards['expected_total']:.2f}")
+
     print()
     print("MODEL DIAGNOSTICS")
     print(f"Model Disagreement: {result.model_disagreement_level}")

@@ -47,6 +47,10 @@ class Prediction(Base, TimestampMixin):
     model_disagreement_level: Mapped[DisagreementLevel | None] = mapped_column()
     ood_status: Mapped[bool] = mapped_column(default=False, nullable=False)
 
+    # First-half/corners/cards (sections 31-33) — independently eligible add-on
+    # markets. Missing/unavailable ones are simply absent keys, never fabricated.
+    supplementary_markets: Mapped[dict | None] = mapped_column(JSON)
+
     snapshot: Mapped["PredictionSnapshot | None"] = relationship(
         back_populates="prediction", uselist=False, cascade="all, delete-orphan"
     )

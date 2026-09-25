@@ -22,6 +22,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 2 — Historical data ingestion + validation + team mapping.**
 - **Phase 3 — Dixon-Coles + Poisson + dynamic team-strength models.**
 - **Phase 4 — Score matrix + probabilistic forecasting.**
+- **Phase 5 — xG, hierarchical shrinkage, and the first-half/corners/cards models.**
 
 Everything else in the roadmap (forecasting models, ensembling, calibration,
 drift monitoring, auth, full dashboard) is **not yet implemented**. The
@@ -87,9 +88,10 @@ adapters exist today:
   `FOOTBALL_DATA_ORG_API_KEY` in `.env`. Its free tier does not expose
   granular match statistics or xG, so `statistics()` returns `[]` and
   `xg()` returns `None` for it — reported as unavailable rather than
-  fabricated (section 20 of the build spec). A model that depends on those
-  signals should be marked `DISABLED` for this provider once the
-  model-eligibility engine (section 17) is built.
+  fabricated (section 20 of the build spec). The model-eligibility engine
+  (section 17) automatically marks `corners_model`/`cards_model`/`xg_model`
+  `DISABLED` with a specific reason for this provider, rather than
+  training on data that doesn't exist.
 
 Adding a second live provider (for automatic failover, section 9) means
 writing one more adapter against `FootballDataProvider` — nothing upstream
@@ -124,7 +126,11 @@ app/
     data_quality.py             completeness/freshness/reliability scoring + lifecycle updates
     league_parameters.py        league scoring-environment baselines + shrinkage (section 16)
     model_eligibility.py        which models can run for a competition, and why not (section 17)
-    model_training.py           fits/persists Dixon-Coles + Poisson per competition
+    model_version_registry.py   shared ModelVersion persist/retire/disable logic
+    model_training.py           fits/persists Dixon-Coles + Poisson + hierarchical per competition
+    hierarchical_shrinkage.py   per-team partial-pooling shrinkage of attack/defence (section 22)
+    market_models.py            first-half/corners/cards models, reusing the goal-model engine
+    xg_model.py                 xG-based expected goals (ratio model; DATA_UNAVAILABLE-aware)
     team_strength.py            per-team attack/defence/home/away/recent strength snapshots
     forecast_service.py         quality gate -> score matrix -> prediction registry (section 61)
     sync_orchestrator.py        wires all of the above into one full-sync run
@@ -135,7 +141,8 @@ migrations/       Alembic, wired to app.config + app.database.models
 scripts/          CLI entry points (init_db, sync_competitions, sync_all, generate_forecasts)
 tests/            pytest suite (providers, discovery, team mapping, fixture sync,
                   movement detection, data quality, goal-model MLE, model training,
-                  league parameters, score matrix, forecast service, full-sync
+                  hierarchical shrinkage, market models, xG model, league
+                  parameters, score matrix, forecast service, full-sync
                   orchestration, DB constraints)
 ```
 
@@ -209,12 +216,13 @@ currently synced for it:
    producing a zero/negative probability; `GoalModelFit.converged` reports
    whether the optimizer actually succeeded.
 3. **Dynamic team strength** (`team_strength.py`, section 21) — persists
-   attack/defence (from the primary fit), an opponent-adjusted net rating,
-   empirical home/away goal-difference splits, a `recent_strength` from a
-   *separately* time-decayed refit of the same matches, and an uncertainty
-   estimate (asymptotic MLE standard error via the inverse Hessian). This
-   is a pragmatic first cut, not yet the state-space/Kalman model section
-   21 lists as an option.
+   attack/defence from the *hierarchically-shrunk* fit (see Phase 5 below),
+   an opponent-adjusted net rating, empirical home/away goal-difference
+   splits, a `recent_strength` from a *separately* time-decayed refit of
+   the same matches, and an uncertainty estimate (asymptotic MLE standard
+   error from the raw, unshrunk fit, via the inverse Hessian). This is a
+   pragmatic first cut, not yet the state-space/Kalman model section 21
+   lists as an option.
 
 Each run retires the competition's previous `ModelVersion` for that model
 name (kept as `RETIRED`, not deleted) before activating the new one — there's
@@ -226,8 +234,7 @@ estimates each competition+season's scoring environment (average home/away/
 total goals, home advantage, draw frequency, scoring variance), shrinking
 toward a pooled global prior — a simple empirical-Bayes blend weighted by
 sample size — when a season has fewer than `league_shrinkage_min_sample`
-results. This is a first, pragmatic pass at section 16's "hierarchical
-shrinkage," not yet the fuller partial-pooling model in section 22.
+results.
 
 ### Score matrix and probabilistic forecasting (Phase 4)
 
@@ -276,7 +283,53 @@ into an actual forecast for one fixture, and registers it:
 `GET /predictions/{fixture}` reads the latest registered prediction;
 `GET /predictions/{fixture}/distribution` returns the raw score matrix and
 goal distribution; `POST /forecast?fixture=...` (re)generates one.
-First-half/corners/cards forecasts and full ensemble weighting are Phase 5/6.
+
+### xG, hierarchical shrinkage, first-half/corners/cards (Phase 5)
+
+Four more model-fitting steps run per competition (`sync_orchestrator.py`),
+each independently eligible — none of them can block or degrade the main
+goals-based forecast:
+
+1. **Hierarchical / partial-pooling shrinkage** (`hierarchical_shrinkage.py`,
+   section 22) — pulls a team's raw Dixon-Coles attack/defence toward the
+   competition's own mean (0, since fits are recentered) in proportion to
+   how *few matches that specific team* has played, regardless of how much
+   data the competition as a whole has. A newly promoted team with 3
+   matches gets pulled hard toward average even in a data-rich league; an
+   established team with 30+ is barely touched. Persisted as its own
+   `hierarchical_model` `ModelVersion` and used as the source for
+   `TeamStrength.attack_strength`/`defence_strength` — the raw MLE numbers
+   remain available via the `dixon_coles` version for comparison. This is
+   a simple empirical-Bayes blend, not yet the fuller cross-competition/
+   region pooling section 22 describes.
+2. **First-half model** (`market_models.py`, section 31) — a fully
+   independent Dixon-Coles-style fit on first-half goals (not full-match
+   goals divided by two), giving its own expected first-half goals and
+   most-probable first-half score.
+3. **Corners and cards models** (`market_models.py`, sections 32-33) —
+   reuse the same Poisson attack/defence engine as goals (corners, cards
+   and goals are all non-negative home/away count data), fit without the
+   Dixon-Coles low-score correction since that correction was validated
+   for match scorelines specifically. Cards combine yellow + red into one
+   count. Built from `MatchStatistic` rows; a fixture missing either
+   team's stat for a match is excluded rather than guessed. No referee
+   adjustment is attempted — neither provider supplies referee data, and
+   it is never fabricated.
+4. **xG model** (`xg_model.py`, section 20) — DISABLED with a
+   `DATA_UNAVAILABLE`-style reason whenever a competition has no `XGData`
+   (true for both providers configured today). When xG does exist, this
+   computes a simple attack-strength x defence-weakness ratio against the
+   competition's own average xG per team — not the Poisson MLE used
+   elsewhere, since xG is continuous rather than count data. Combining it
+   with the goal-based distribution is ensemble work (Phase 6).
+
+All four use the same eligibility engine and `ModelVersion` retire/persist
+machinery as Phase 3's models (`model_eligibility.py`'s `evaluate_market`,
+`model_version_registry.py`), so `/models` lists every model — enabled or
+disabled, with its reason — the same way regardless of which one produced it.
+`ForecastService` attaches first-half/corners/cards sections to a forecast
+automatically when their models are enabled for the competition, and simply
+omits them (with a note in `administrator_notes.warnings`) when they aren't.
 
 ## Roadmap
 
@@ -284,7 +337,7 @@ First-half/corners/cards forecasts and full ensemble weighting are Phase 5/6.
 2. **Historical data ingestion + validation + team mapping** — done
 3. **Dixon–Coles + Poisson + dynamic strength models** — done
 4. **Score matrix + probabilistic forecasting** — done
-5. xG + hierarchical + additional models (corners, cards, first-half)
+5. **xG + hierarchical + additional models (corners, cards, first-half)** — done
 6. Ensemble + calibration + uncertainty
 7. Walk-forward backtesting + model evaluation
 8. Automatic league/season synchronization (fixtures, results, full sync report)

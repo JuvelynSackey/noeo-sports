@@ -66,6 +66,17 @@ class Settings(BaseSettings):
     model_disagreement_low_threshold: float = 0.05
     model_disagreement_high_threshold: float = 0.15
 
+    # Hierarchical / partial-pooling shrinkage of per-team ratings (section 22).
+    # Weight on a team's own raw rating is games_played / (games_played + k) —
+    # smaller k than the league-level prior (section 16) because it operates on
+    # a single team's own match count, which is naturally much smaller.
+    team_shrinkage_prior_strength: float = 6.0
+
+    # Additional markets (sections 20, 31, 32, 33). Corners/cards reuse
+    # min_matches_for_model_fit as their eligibility threshold.
+    xg_model_min_matches: int = 10
+    first_half_model_min_matches: int = 10
+
 
 @lru_cache
 def get_settings() -> Settings:
