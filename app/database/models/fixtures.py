@@ -29,6 +29,8 @@ class Fixture(Base, TimestampMixin, ProvenanceMixin):
     result: Mapped["Result | None"] = relationship(back_populates="fixture", uselist=False, cascade="all, delete-orphan")
     statistics: Mapped[list["MatchStatistic"]] = relationship(back_populates="fixture", cascade="all, delete-orphan")
     xg: Mapped["XGData | None"] = relationship(back_populates="fixture", uselist=False, cascade="all, delete-orphan")
+    home_team: Mapped["Team"] = relationship(foreign_keys=[home_team_id])
+    away_team: Mapped["Team"] = relationship(foreign_keys=[away_team_id])
 
 
 class Result(Base, TimestampMixin, ProvenanceMixin):

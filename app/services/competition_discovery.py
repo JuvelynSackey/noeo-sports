@@ -21,6 +21,7 @@ from app.database.models.enums import (
 )
 from app.database.models.monitoring import SystemEvent
 from app.logging_config import get_logger
+from app.services.enum_utils import safe_enum
 from app.services.identifiers import canonical_id
 from app.services.season_detection import detect_season_window, infer_season_status
 
@@ -38,15 +39,6 @@ class CompetitionDiscoveryReport:
     new_seasons: list[str] = field(default_factory=list)
     updated_seasons: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
-
-
-def _safe_enum(enum_cls, value: str | None, default):
-    if value is None:
-        return default
-    try:
-        return enum_cls(value)
-    except ValueError:
-        return default
 
 
 class CompetitionDiscoveryService:
@@ -98,9 +90,9 @@ class CompetitionDiscoveryService:
         competition.name = dto.competition_name
         competition.country = dto.country
         competition.region = dto.region
-        competition.competition_type = _safe_enum(CompetitionType, dto.competition_type, CompetitionType.UNKNOWN)
+        competition.competition_type = safe_enum(CompetitionType, dto.competition_type, CompetitionType.UNKNOWN)
         competition.division_level = dto.division_level
-        competition.competition_format = _safe_enum(
+        competition.competition_format = safe_enum(
             CompetitionFormat, dto.competition_format, CompetitionFormat.UNKNOWN
         )
         competition.number_of_teams = dto.number_of_teams
@@ -148,7 +140,7 @@ class CompetitionDiscoveryService:
         season.name = dto.name
         season.start_date = dto.start_date
         season.end_date = dto.end_date
-        season.status = _safe_enum(SeasonStatus, infer_season_status(window, dto), SeasonStatus.FINISHED)
+        season.status = safe_enum(SeasonStatus, infer_season_status(window, dto), SeasonStatus.FINISHED)
         season.source_provider = dto.source_provider
         season.source_record_id = dto.source_record_id
         season.retrieved_at = dto.retrieved_at
