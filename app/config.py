@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     min_data_quality_for_full_ensemble: float = 0.75
     min_data_quality_for_forecast: float = 0.40
 
+    # Model eligibility / fitting (sections 17, 18, 19, 21)
+    min_matches_for_model_fit: int = 10
+    min_days_span_for_dynamic_strength: int = 30
+    model_l2_regularization: float = 0.01
+    recent_form_half_life_days: float = 60.0
+
+    # League baselines (section 16) — hierarchical shrinkage toward a global prior
+    # when a competition/season has fewer than this many matches.
+    league_shrinkage_min_sample: int = 30
+    league_shrinkage_prior_strength: float = 20.0
+
 
 @lru_cache
 def get_settings() -> Settings:

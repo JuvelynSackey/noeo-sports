@@ -20,10 +20,14 @@ from app.api.schemas import (
     DataQualityOut,
     DiscoveryReportOut,
     FixtureOut,
+    LeagueParameterOut,
+    ModelVersionDetailOut,
+    ModelVersionSummaryOut,
     MovementReportOut,
     SyncReportOut,
     SystemHealthOut,
     TeamOut,
+    TeamStrengthOut,
 )
 from app.config import get_settings
 from app.data.providers import get_provider
@@ -31,6 +35,8 @@ from app.database.base import get_db
 from app.database.models.competitions import Competition, Season
 from app.database.models.enums import CompetitionStatus
 from app.database.models.fixtures import Fixture
+from app.database.models.league import LeagueParameter, TeamStrength
+from app.database.models.modeling import ModelVersion
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
 from app.services.sync_orchestrator import FullSyncService
@@ -146,11 +152,150 @@ def data_quality(
     return out
 
 
+@app.get("/league-parameters", response_model=list[LeagueParameterOut])
+def league_parameters(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    db: Session = Depends(get_db),
+) -> list[LeagueParameterOut]:
+    query = db.query(LeagueParameter).join(Competition, LeagueParameter.competition_id == Competition.id).join(
+        Season, LeagueParameter.season_id == Season.id
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+
+    out = []
+    for record, comp_canonical, season_canonical in query.with_entities(
+        LeagueParameter, Competition.canonical_competition_id, Season.canonical_season_id
+    ).all():
+        out.append(
+            LeagueParameterOut(
+                competition_canonical_id=comp_canonical,
+                season_canonical_id=season_canonical,
+                avg_home_goals=record.avg_home_goals,
+                avg_away_goals=record.avg_away_goals,
+                avg_total_goals=record.avg_total_goals,
+                home_advantage=record.home_advantage,
+                draw_frequency=record.draw_frequency,
+                scoring_variance=record.scoring_variance,
+                sample_size=record.sample_size,
+                shrinkage_applied=record.shrinkage_applied,
+                computed_at=record.computed_at,
+            )
+        )
+    return out
+
+
+@app.get("/teams/{canonical_team_id}/strength", response_model=list[TeamStrengthOut])
+def team_strength(
+    canonical_team_id: str,
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    db: Session = Depends(get_db),
+) -> list[TeamStrengthOut]:
+    team = db.query(Team).filter_by(canonical_team_id=canonical_team_id).first()
+    if team is None:
+        raise HTTPException(status_code=404, detail="Team not found")
+
+    query = (
+        db.query(TeamStrength)
+        .join(Competition, TeamStrength.competition_id == Competition.id)
+        .filter(TeamStrength.team_id == team.id)
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+
+    out = []
+    for record, comp_canonical in query.with_entities(TeamStrength, Competition.canonical_competition_id).order_by(
+        TeamStrength.as_of.desc()
+    ).all():
+        out.append(
+            TeamStrengthOut(
+                team_canonical_id=canonical_team_id,
+                competition_canonical_id=comp_canonical,
+                as_of=record.as_of,
+                attack_strength=record.attack_strength,
+                defence_strength=record.defence_strength,
+                home_strength=record.home_strength,
+                away_strength=record.away_strength,
+                opponent_adjusted_strength=record.opponent_adjusted_strength,
+                recent_strength=record.recent_strength,
+                uncertainty=record.uncertainty,
+                method=record.method,
+            )
+        )
+    return out
+
+
+@app.get("/models", response_model=list[ModelVersionSummaryOut])
+def list_models(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    model_name: str | None = Query(default=None),
+    status: str | None = Query(default=None, description="ENABLED / DISABLED / RETIRED / CHAMPION / CHALLENGER"),
+    db: Session = Depends(get_db),
+) -> list[ModelVersionSummaryOut]:
+    query = db.query(ModelVersion).outerjoin(Competition, ModelVersion.competition_id == Competition.id)
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+    if model_name:
+        query = query.filter(ModelVersion.model_name == model_name)
+    if status:
+        query = query.filter(ModelVersion.status == status)
+
+    out = []
+    for mv, comp_canonical in query.with_entities(ModelVersion, Competition.canonical_competition_id).order_by(
+        ModelVersion.trained_at.desc().nullslast()
+    ).all():
+        out.append(
+            ModelVersionSummaryOut(
+                model_name=mv.model_name,
+                version=mv.version,
+                status=mv.status.value if hasattr(mv.status, "value") else str(mv.status),
+                disabled_reason=mv.disabled_reason,
+                competition_canonical_id=comp_canonical,
+                trained_at=mv.trained_at,
+                training_window_start=mv.training_window_start,
+                training_window_end=mv.training_window_end,
+                evaluation_metrics=mv.evaluation_metrics,
+                is_reproducible=mv.is_reproducible,
+            )
+        )
+    return out
+
+
+@app.get("/models/{version}", response_model=ModelVersionDetailOut)
+def get_model(version: str, db: Session = Depends(get_db)) -> ModelVersionDetailOut:
+    """Includes raw fitted parameters — administrator-only once auth (Phase 10) exists."""
+    row = (
+        db.query(ModelVersion, Competition.canonical_competition_id)
+        .outerjoin(Competition, ModelVersion.competition_id == Competition.id)
+        .filter(ModelVersion.version == version)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    mv, comp_canonical = row
+    return ModelVersionDetailOut(
+        model_name=mv.model_name,
+        version=mv.version,
+        status=mv.status.value if hasattr(mv.status, "value") else str(mv.status),
+        disabled_reason=mv.disabled_reason,
+        competition_canonical_id=comp_canonical,
+        trained_at=mv.trained_at,
+        training_window_start=mv.training_window_start,
+        training_window_end=mv.training_window_end,
+        evaluation_metrics=mv.evaluation_metrics,
+        is_reproducible=mv.is_reproducible,
+        hyperparameters=mv.hyperparameters,
+        parameters=mv.parameters,
+    )
+
+
 @app.post("/sync", response_model=SyncReportOut)
 def sync(db: Session = Depends(get_db)) -> SyncReportOut:
-    """Runs the full pipeline (section 51, steps 1-7): discovery, team
-    mapping, fixture/result sync, promotion/relegation detection and data
-    quality scoring. Model training/calibration (steps 8+) land in later phases."""
+    """Runs the full pipeline (section 51, steps 1-11): discovery, team
+    mapping, fixture/result sync, promotion/relegation detection, data
+    quality scoring, league baselines, model eligibility and Dixon-Coles/
+    Poisson/team-strength training. Calibration and forecast generation
+    (steps 12+) land in Phase 4+."""
     settings = get_settings()
     provider = get_provider(settings)
     try:

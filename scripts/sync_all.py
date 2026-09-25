@@ -1,6 +1,7 @@
 """CLI entry point for the full synchronization pipeline (MASTER BUILD
 PROMPT section 51): discovery -> team mapping -> fixtures/results ->
-promotion/relegation detection -> data quality scoring.
+promotion/relegation detection -> data quality -> league baselines ->
+model eligibility -> Dixon-Coles/Poisson/team-strength training.
 """
 from __future__ import annotations
 
@@ -56,6 +57,16 @@ def main() -> None:
         print(f"Relegations detected: {len(report.movements.relegated)}")
         print(f"New-to-competition teams: {len(report.movements.new_teams)}")
         print(f"Unaccounted departures: {len(report.movements.departed_teams)}")
+    print()
+    print("Model training:")
+    for competition_id, training in report.model_training.items():
+        if training.skipped_reason:
+            print(f"  {competition_id}: SKIPPED ({training.skipped_reason})")
+        else:
+            print(
+                f"  {competition_id}: dixon_coles={training.dixon_coles_version} "
+                f"poisson={training.poisson_version} team_strength_rows={training.team_strength_rows}"
+            )
     print()
     print(f"Errors: {len(report.errors)}")
     for error in report.errors:

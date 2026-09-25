@@ -20,6 +20,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 
 - **Phase 1 — Database + provider abstraction + competition discovery.**
 - **Phase 2 — Historical data ingestion + validation + team mapping.**
+- **Phase 3 — Dixon-Coles + Poisson + dynamic team-strength models.**
 
 Everything else in the roadmap (forecasting models, ensembling, calibration,
 drift monitoring, auth, full dashboard) is **not yet implemented**. The
@@ -47,6 +48,9 @@ uvicorn app.api.main:app --reload
 #       GET  http://127.0.0.1:8000/competitions
 #       GET  http://127.0.0.1:8000/fixtures?competition=mock:MOCK-D1&season=2024
 #       GET  http://127.0.0.1:8000/data-quality
+#       GET  http://127.0.0.1:8000/models?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/league-parameters?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/teams/mock:MT-01/strength
 ```
 
 Run tests:
@@ -89,13 +93,16 @@ changes.
 
 ```
 app/
-  api/            FastAPI app (health, competitions, teams, fixtures, data-quality, sync)
+  api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
+                  models, league-parameters, team-strength, sync)
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
   database/
     base.py       Engine/session (SQLite or PostgreSQL via DATABASE_URL)
     models/       ORM models for every table in the target schema (see below)
+  models/
+    goal_model.py              shared Dixon-Coles / Poisson-baseline MLE engine
   services/
     identifiers.py             canonical "<provider>:<native_id>" ID scheme
     enum_utils.py               defensive provider-string -> enum parsing
@@ -106,6 +113,10 @@ app/
     fixture_sync.py             fixtures/results/statistics/xG ingestion + sanity checks
     movement_detection.py       promotion/relegation detection across adjacent divisions
     data_quality.py             completeness/freshness/reliability scoring + lifecycle updates
+    league_parameters.py        league scoring-environment baselines + shrinkage (section 16)
+    model_eligibility.py        which models can run for a competition, and why not (section 17)
+    model_training.py           fits/persists Dixon-Coles + Poisson per competition
+    team_strength.py            per-team attack/defence/home/away/recent strength snapshots
     sync_orchestrator.py        wires all of the above into one full-sync run
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
@@ -113,7 +124,8 @@ app/
 migrations/       Alembic, wired to app.config + app.database.models
 scripts/          CLI entry points (init_db, sync_competitions, sync_all)
 tests/            pytest suite (providers, discovery, team mapping, fixture sync,
-                  movement detection, data quality, full-sync orchestration, DB constraints)
+                  movement detection, data quality, goal-model MLE, model training,
+                  league parameters, full-sync orchestration, DB constraints)
 ```
 
 ### Database
@@ -163,11 +175,54 @@ against its current season plus the single most recent finished one:
    moves the competition toward `ACTIVE` or back to `LIMITED_DATA`
    (section 50's lifecycle) rather than a person doing it by hand.
 
+### Forecasting models: Dixon-Coles, Poisson, team strength (Phase 3)
+
+`ModelTrainingService` (`app/services/model_training.py`) runs once per
+competition after data quality scoring, on top of every completed result
+currently synced for it:
+
+1. **Model eligibility** (`model_eligibility.py`, section 17) — Dixon-Coles
+   and the Poisson baseline need at least `min_matches_for_model_fit`
+   completed results and 2+ teams; dynamic team strength additionally needs
+   the results to span `min_days_span_for_dynamic_strength` days (otherwise
+   there's no real "recent form" signal to compute). A competition that
+   fails either check gets a `DISABLED` `ModelVersion` row with a
+   human-readable reason instead of silently having no forecast.
+2. **Dixon-Coles + Poisson baseline** (`app/models/goal_model.py`, sections
+   18-19) — one shared, vectorized MLE engine fits attack/defence/home-
+   advantage for every team at once; Dixon-Coles additionally fits the
+   low-score correlation parameter (rho) and its tau correction (applied
+   only to 0-0/0-1/1-0/1-1, never e.g. 2-0), the Poisson baseline fixes
+   rho at zero. Bounded parameters, an L2 penalty, clipped lambdas and a
+   floored tau keep the optimizer from exploding, returning NaN, or
+   producing a zero/negative probability; `GoalModelFit.converged` reports
+   whether the optimizer actually succeeded.
+3. **Dynamic team strength** (`team_strength.py`, section 21) — persists
+   attack/defence (from the primary fit), an opponent-adjusted net rating,
+   empirical home/away goal-difference splits, a `recent_strength` from a
+   *separately* time-decayed refit of the same matches, and an uncertainty
+   estimate (asymptotic MLE standard error via the inverse Hessian). This
+   is a pragmatic first cut, not yet the state-space/Kalman model section
+   21 lists as an option.
+
+Each run retires the competition's previous `ModelVersion` for that model
+name (kept as `RETIRED`, not deleted) before activating the new one — there's
+no champion/challenger comparison yet (that's Phase 11), just "the latest
+fit replaces the last one."
+
+`LeagueParameterService` (`league_parameters.py`, section 16) separately
+estimates each competition+season's scoring environment (average home/away/
+total goals, home advantage, draw frequency, scoring variance), shrinking
+toward a pooled global prior — a simple empirical-Bayes blend weighted by
+sample size — when a season has fewer than `league_shrinkage_min_sample`
+results. This is a first, pragmatic pass at section 16's "hierarchical
+shrinkage," not yet the fuller partial-pooling model in section 22.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
 2. **Historical data ingestion + validation + team mapping** — done
-3. Dixon–Coles + Poisson + dynamic strength models
+3. **Dixon–Coles + Poisson + dynamic strength models** — done
 4. Score matrix + probabilistic forecasting
 5. xG + hierarchical + additional models (corners, cards, first-half)
 6. Ensemble + calibration + uncertainty

@@ -1,8 +1,9 @@
 """Full synchronization pipeline — MASTER BUILD PROMPT section 51 (steps
-1-7 of that list; steps 8+ are model training/calibration, added in later
-phases). Wires together: discover competitions/seasons -> map teams ->
+1-11 of that list; calibration/forecast generation, steps 12+, land in
+Phase 4+). Wires together: discover competitions/seasons -> map teams ->
 sync fixtures/results/statistics/xG -> detect promotion/relegation ->
-score data quality -> move competitions through their lifecycle.
+score data quality -> calculate league baselines -> evaluate model
+eligibility -> train Dixon-Coles/Poisson/team-strength models.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ from app.logging_config import get_logger
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
 from app.services.data_quality import DataQualityService
 from app.services.fixture_sync import FixtureSyncService
+from app.services.league_parameters import LeagueParameterService
+from app.services.model_training import ModelTrainingReport, ModelTrainingService
 from app.services.movement_detection import MovementDetectionService, MovementReport
 from app.services.team_mapping import TeamMappingService
 
@@ -38,6 +41,7 @@ class FullSyncReport:
     new_results: int = 0
     data_quality_summary: dict[str, str] = field(default_factory=dict)
     movements: MovementReport | None = None
+    model_training: dict[str, ModelTrainingReport] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -116,3 +120,10 @@ class FullSyncService:
             report.data_quality_summary[f"{competition.canonical_competition_id}:{season.canonical_season_id}"] = (
                 quality.status.value if isinstance(quality.status, DataQualityStatus) else str(quality.status)
             )
+
+            LeagueParameterService(self.db).compute(competition, season)
+
+        # Model training aggregates across every season currently synced for this
+        # competition (see ModelTrainingService), so it runs once per competition
+        # rather than inside the per-season loop above.
+        report.model_training[competition.canonical_competition_id] = ModelTrainingService(self.db).train(competition)

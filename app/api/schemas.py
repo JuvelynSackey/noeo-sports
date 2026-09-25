@@ -124,3 +124,58 @@ class DataQualityOut(BaseModel):
     fixture_completeness: float | None
     issues: list[str]
     evaluated_at: dt.datetime
+
+
+class LeagueParameterOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    season_canonical_id: str
+    avg_home_goals: float | None
+    avg_away_goals: float | None
+    avg_total_goals: float | None
+    home_advantage: float | None
+    draw_frequency: float | None
+    scoring_variance: float | None
+    sample_size: int
+    shrinkage_applied: bool
+    computed_at: dt.datetime
+
+
+class TeamStrengthOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    team_canonical_id: str
+    competition_canonical_id: str
+    as_of: dt.datetime
+    attack_strength: float | None
+    defence_strength: float | None
+    home_strength: float | None
+    away_strength: float | None
+    opponent_adjusted_strength: float | None
+    recent_strength: float | None
+    uncertainty: float | None
+    method: str | None
+
+
+class ModelVersionSummaryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    model_name: str
+    version: str
+    status: str
+    disabled_reason: str | None
+    competition_canonical_id: str | None
+    trained_at: dt.datetime | None
+    training_window_start: dt.datetime | None
+    training_window_end: dt.datetime | None
+    evaluation_metrics: dict | None
+    is_reproducible: bool
+
+
+class ModelVersionDetailOut(ModelVersionSummaryOut):
+    # NOTE: raw model parameters (section 54: administrator-only diagnostics).
+    # Exposed here because auth/RBAC isn't wired up yet (Phase 10) — restrict
+    # this endpoint's audience accordingly until it is.
+    hyperparameters: dict | None
+    parameters: dict | None
