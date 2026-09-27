@@ -377,3 +377,45 @@ class MatchForecastOut(BaseModel):
     model_diagnostics: ModelDiagnosticsOut
     model_information: ModelInformationOut
     administrator_notes: AdministratorNotesOut
+
+
+class TokenOut(BaseModel):
+    """OAuth2 password-flow response (section 54)."""
+
+    access_token: str
+    token_type: str = "bearer"
+    role: str
+    expires_at: dt.datetime
+
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    email: str
+    role: str
+    is_active: bool
+    created_at: dt.datetime
+
+
+class UserCreateIn(BaseModel):
+    email: str
+    password: str
+    role: str = "VIEWER"
+
+
+class UserUpdateIn(BaseModel):
+    role: str | None = None
+    is_active: bool | None = None
+
+
+class AuditLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    actor_email: str | None
+    actor_role: str | None
+    action: str
+    resource_type: str | None
+    resource_id: str | None
+    details: dict | None
+    occurred_at: dt.datetime

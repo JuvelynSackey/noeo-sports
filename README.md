@@ -27,12 +27,17 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 7 — Walk-forward backtesting and model evaluation.**
 - **Phase 8 — Automatic synchronization report + scheduling.**
 - **Phase 9 — Model/data drift detection and out-of-distribution flagging.**
+- **Phase 10 — Authentication, role-based access control, and audit logging.**
 
-Everything else in the roadmap (auth, the full admin dashboard,
-champion/challenger deployment) is **not yet implemented**. The
-schema for most of it already exists (see `app/database/models/`) so later
-phases can build on stable tables without re-migrating, but the business
-logic behind those tables is still to come.
+Everything else in the roadmap (champion/challenger deployment, production
+hardening) is **not yet implemented**. The schema for most of it already
+exists (see `app/database/models/`) so later phases can build on stable
+tables without re-migrating, but the business logic behind those tables is
+still to come. Note on scope: "administrator dashboard" in the roadmap is
+delivered here as a secured, role-gated **API** (the diagnostics endpoints
+built in Phases 6-9, now behind auth) rather than a separate browser
+front-end — consistent with every prior phase, which is API-only with no UI
+layer of its own.
 
 ## Quickstart
 
@@ -112,11 +117,12 @@ changes.
 
 ```
 app/
-  api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
-                  models, model-performance, backtests, calibration,
-                  league-parameters, team-strength, forecast/predictions, sync,
-                  monitoring); its lifespan starts the background scheduler
-                  when enabled
+  api/            FastAPI app (health, auth/users/audit-logs, competitions,
+                  teams, fixtures, data-quality, models, model-performance,
+                  backtests, calibration, league-parameters, team-strength,
+                  forecast/predictions, sync, monitoring); its lifespan
+                  starts the background scheduler when enabled
+    deps.py        get_current_user / require_roles — JWT auth + RBAC dependencies
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -164,18 +170,22 @@ app/
     sync_orchestrator.py        wires all of the above into one full-sync run
     sync_report.py               renders the section-63 synchronization report from a FullSyncReport
     scheduler.py                 optional background full-sync on a fixed interval (section 13/64)
+    auth.py                     password hashing (bcrypt) + JWT issuance/verification (section 54)
+    audit.py                     append-only AuditLog writer for sensitive administrative actions
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
 
 migrations/       Alembic, wired to app.config + app.database.models
-scripts/          CLI entry points (init_db, sync_competitions, sync_all, generate_forecasts)
+scripts/          CLI entry points (init_db, sync_competitions, sync_all,
+                  generate_forecasts, create_admin)
 tests/            pytest suite (providers, discovery, team mapping, fixture sync,
                   movement detection, data quality, goal-model MLE, model training,
                   hierarchical shrinkage, market models, xG model, league
                   parameters, score matrix, evaluation metrics, walk-forward
                   backtesting, ensemble, calibration, sync report, scheduler,
                   forecast service, full-sync orchestration, drift metrics,
-                  drift detection, OOD detection, DB constraints)
+                  drift detection, OOD detection, auth service, API auth/RBAC,
+                  DB constraints)
 ```
 
 ### Database
@@ -528,6 +538,52 @@ to satisfy sections 34-37.
    existing `ood_status` in every forecast's `model_diagnostics`, on both
    `POST /forecast` and `GET /predictions/{fixture}`.
 
+### Authentication, RBAC and audit logging (Phase 10)
+
+1. **Login** — `POST /auth/token` implements the OAuth2 password flow
+   (form-encoded `username`/`password`, not JSON — that's what
+   `OAuth2PasswordRequestForm` expects) and returns a signed JWT
+   (`app/services/auth.py`, HS256 via `settings.secret_key`) plus the
+   caller's role and expiry. An unknown email, a disabled account, and a
+   correct email with the wrong password all return the same 401 —
+   deliberately indistinguishable, so this endpoint can't be used to
+   enumerate valid accounts. `GET /auth/me` returns the caller's own
+   profile from a valid token.
+2. **Every endpoint now requires a token** except `GET /system-health`
+   (load-balancer/liveness checks) and `POST /auth/token` itself.
+   `app/api/deps.py::get_current_user` decodes the bearer JWT and re-checks
+   the user's `is_active` flag against the database on *every* request —
+   deactivating a user takes effect immediately, without waiting for their
+   existing token to expire.
+3. **Role-based access control** (`UserRole`: `ADMIN`, `ANALYST`, `VIEWER`,
+   `SYSTEM`) — any authenticated role can reach the read-only
+   forecast/competition/backtest/calibration endpoints, but
+   `app/api/deps.py::require_roles` additionally gates: raw model
+   parameters (`GET /models/{version}`) and drift monitoring
+   (`GET /monitoring`) to `ADMIN`/`ANALYST`; and triggering a full sync
+   (`POST /sync`) and all user management (`POST/GET/PATCH /users`,
+   `GET /audit-logs`) to `ADMIN` only. `SYSTEM` is reserved for future
+   service-to-service calls (the background scheduler itself bypasses the
+   API entirely, calling `FullSyncService` in-process, so it needs no
+   token today).
+4. **User management and audit logging** — `POST /users` creates an
+   account (ADMIN only); there's a chicken-and-egg problem for the very
+   first one, since creating a user requires an existing ADMIN caller, so
+   `scripts/create_admin.py` bootstraps it by writing directly to the
+   database. `PATCH /users/{id}` changes a user's role or `is_active`
+   flag. Every one of these, plus every `POST /sync`, is written as an
+   `AuditLog` row (`app/services/audit.py`) — actor email/role, action,
+   resource, and a JSON detail blob — queryable via `GET /audit-logs`
+   (filterable by `action`/`actor_email`) and, like `ModelMonitoring`,
+   append-only.
+5. **What this is not**: a browser-based admin UI. "Administrator
+   dashboard" here means the diagnostics API from Phases 6-9 is now
+   authenticated and role-gated, not a new front-end — see the scope note
+   in **Status** above. Passwords are hashed with bcrypt via `passlib`;
+   note that `passlib` 1.7.4 is unmaintained and misdetects `bcrypt>=4.1`
+   as buggy (it probes a `bcrypt.__about__` module that newer bcrypt
+   removed), so `requirements.txt` pins `bcrypt==4.0.1`.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -539,7 +595,7 @@ to satisfy sections 34-37.
 7. **Walk-forward backtesting + model evaluation** — done
 8. **Automatic league/season synchronization (fixtures, results, full sync report)** — done
 9. **Monitoring + drift detection + OOD detection** — done
-10. Administrator dashboard + authentication/RBAC
+10. **Administrator dashboard (API) + authentication/RBAC** — done
 11. Champion/challenger deployment + rollback
 12. Testing hardening + production deployment
 

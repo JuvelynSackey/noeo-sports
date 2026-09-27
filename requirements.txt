@@ -16,6 +16,9 @@ scikit-learn==1.9.1
 statsmodels==0.15.0
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+# passlib 1.7.4 (unmaintained since 2020) probes bcrypt's removed `__about__`
+# module and misdetects bcrypt>=4.1 as buggy; pin below that line.
+bcrypt==4.0.1
 python-multipart==0.0.20
 structlog==25.4.0
 pytest==8.4.2

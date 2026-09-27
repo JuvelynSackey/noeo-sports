@@ -3,13 +3,14 @@
 Competition/season/team/fixture read endpoints, data quality, league
 parameters, team strength, model versions/performance/backtests/
 calibration, forecast generation (score matrix + everything derived from
-it), and a full-sync trigger — plus, when `settings.scheduler_enabled` is
-set, an automatic background full-sync on a fixed interval (section 13/64).
+it), a full-sync trigger, and authentication/RBAC/audit logging (section
+54) — plus, when `settings.scheduler_enabled` is set, an automatic
+background full-sync on a fixed interval (section 13/64).
 
-NOTE: authentication/authorization (section 54) is not wired up yet — that
-is Phase 10. Do not expose this app on an untrusted network as-is; `/sync`
-and `/forecast` in particular trigger writes to the database (and, for
-`/sync` with a live provider, outbound API calls).
+Every endpoint below requires a valid bearer token except `/system-health`
+and `POST /auth/token` itself. Administrator-only actions (raw model
+parameters, drift monitoring, `/sync`, user management, audit logs) further
+require the ADMIN or ANALYST role via `require_roles` — see `app/api/deps.py`.
 """
 from __future__ import annotations
 
@@ -17,11 +18,14 @@ from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user, require_roles
 from app.api.schemas import (
     AdministratorNotesOut,
+    AuditLogOut,
     BacktestOut,
     CalibrationDiagnosticOut,
     CalibrationOut,
@@ -49,12 +53,17 @@ from app.api.schemas import (
     SystemHealthOut,
     TeamOut,
     TeamStrengthOut,
+    TokenOut,
+    UserCreateIn,
+    UserOut,
+    UserUpdateIn,
 )
 from app.config import APP_VERSION, get_settings
 from app.data.providers import get_provider
 from app.database.base import get_db
+from app.database.models.audit import AuditLog, User
 from app.database.models.competitions import Competition, Season
-from app.database.models.enums import CompetitionStatus
+from app.database.models.enums import CompetitionStatus, UserRole
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
@@ -63,9 +72,14 @@ from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
+from app.services.audit import record_audit
+from app.services.auth import authenticate_user, create_access_token, hash_password
 from app.services.forecast_service import ForecastService
 from app.services.scheduler import JOB_ID, create_scheduler
 from app.services.sync_orchestrator import FullSyncService
+
+_ADMIN_ONLY = require_roles(UserRole.ADMIN)
+_ADMIN_OR_ANALYST = require_roles(UserRole.ADMIN, UserRole.ANALYST)
 
 _scheduler = None  # set by lifespan when settings.scheduler_enabled; read by /system-health
 
@@ -116,13 +130,106 @@ def system_health(db: Session = Depends(get_db)) -> SystemHealthOut:
     )
 
 
+@app.post("/auth/token", response_model=TokenOut)
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> TokenOut:
+    """OAuth2 password flow (section 54). Deliberately returns the same 401
+    for an unknown email, a disabled account, and a wrong password, so a
+    caller can never use this endpoint to enumerate valid accounts."""
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Incorrect email or password", headers={"WWW-Authenticate": "Bearer"})
+    settings = get_settings()
+    token, expires_at = create_access_token(settings, user=user)
+    return TokenOut(
+        access_token=token,
+        role=user.role.value if hasattr(user.role, "value") else str(user.role),
+        expires_at=expires_at,
+    )
+
+
+@app.get("/auth/me", response_model=UserOut)
+def read_current_user(user: User = Depends(get_current_user)) -> User:
+    return user
+
+
+@app.post("/users", response_model=UserOut, status_code=201)
+def create_user(
+    payload: UserCreateIn, db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)
+) -> User:
+    """Creates a new administrator-surface account — ADMIN only. The very
+    first ADMIN account can't be created this way (there's no admin yet to
+    call it); bootstrap it with `scripts/create_admin.py` instead."""
+    try:
+        role = UserRole(payload.role)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unknown role: {payload.role}")
+    if db.query(User).filter_by(email=payload.email).first() is not None:
+        raise HTTPException(status_code=409, detail="A user with this email already exists")
+
+    user = User(email=payload.email, hashed_password=hash_password(payload.password), role=role)
+    db.add(user)
+    db.flush()
+    record_audit(db, actor, "CREATE_USER", resource_type="user", resource_id=str(user.id), details={"email": user.email, "role": role.value})
+    db.commit()
+    return user
+
+
+@app.get("/users", response_model=list[UserOut])
+def list_users(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> list[User]:
+    return db.query(User).order_by(User.email).all()
+
+
+@app.patch("/users/{user_id}", response_model=UserOut)
+def update_user(
+    user_id: int, payload: UserUpdateIn, db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)
+) -> User:
+    """Role and active-status changes — e.g. deactivating a compromised or
+    departed account. ADMIN only, and always audit-logged."""
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    changes: dict = {}
+    if payload.role is not None:
+        try:
+            user.role = UserRole(payload.role)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=f"Unknown role: {payload.role}")
+        changes["role"] = payload.role
+    if payload.is_active is not None:
+        user.is_active = payload.is_active
+        changes["is_active"] = payload.is_active
+
+    if changes:
+        record_audit(db, actor, "UPDATE_USER", resource_type="user", resource_id=str(user.id), details=changes)
+    db.commit()
+    return user
+
+
+@app.get("/audit-logs", response_model=list[AuditLogOut])
+def audit_logs(
+    action: str | None = Query(default=None),
+    actor_email: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    actor: User = Depends(_ADMIN_ONLY),
+) -> list[AuditLog]:
+    query = db.query(AuditLog)
+    if action:
+        query = query.filter(AuditLog.action == action)
+    if actor_email:
+        query = query.filter(AuditLog.actor_email == actor_email)
+    return query.order_by(AuditLog.occurred_at.desc()).limit(500).all()
+
+
 @app.get("/competitions", response_model=list[CompetitionOut])
-def list_competitions(db: Session = Depends(get_db)) -> list[Competition]:
+def list_competitions(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> list[Competition]:
     return db.query(Competition).order_by(Competition.name).all()
 
 
 @app.get("/competitions/{canonical_competition_id}", response_model=CompetitionDetailOut)
-def get_competition(canonical_competition_id: str, db: Session = Depends(get_db)) -> Competition:
+def get_competition(
+    canonical_competition_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> Competition:
     competition = db.query(Competition).filter_by(canonical_competition_id=canonical_competition_id).first()
     if competition is None:
         raise HTTPException(status_code=404, detail="Competition not found")
@@ -130,7 +237,7 @@ def get_competition(canonical_competition_id: str, db: Session = Depends(get_db)
 
 
 @app.get("/teams/{canonical_team_id}", response_model=TeamOut)
-def get_team(canonical_team_id: str, db: Session = Depends(get_db)) -> Team:
+def get_team(canonical_team_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> Team:
     team = db.query(Team).filter_by(canonical_team_id=canonical_team_id).first()
     if team is None:
         raise HTTPException(status_code=404, detail="Team not found")
@@ -143,6 +250,7 @@ def list_fixtures(
     season: str | None = Query(default=None, description="canonical_season_id, requires `competition`"),
     status: str | None = Query(default=None, description="fixture status, e.g. SCHEDULED / COMPLETED"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[Fixture]:
     query = db.query(Fixture)
     if competition:
@@ -161,7 +269,9 @@ def list_fixtures(
 
 
 @app.get("/fixtures/{canonical_fixture_id}", response_model=FixtureOut)
-def get_fixture(canonical_fixture_id: str, db: Session = Depends(get_db)) -> Fixture:
+def get_fixture(
+    canonical_fixture_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> Fixture:
     fixture = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
     if fixture is None:
         raise HTTPException(status_code=404, detail="Fixture not found")
@@ -172,6 +282,7 @@ def get_fixture(canonical_fixture_id: str, db: Session = Depends(get_db)) -> Fix
 def data_quality(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[DataQualityOut]:
     query = db.query(DataQuality).join(Competition, DataQuality.competition_id == Competition.id).join(
         Season, DataQuality.season_id == Season.id
@@ -205,6 +316,7 @@ def data_quality(
 def league_parameters(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[LeagueParameterOut]:
     query = db.query(LeagueParameter).join(Competition, LeagueParameter.competition_id == Competition.id).join(
         Season, LeagueParameter.season_id == Season.id
@@ -239,6 +351,7 @@ def team_strength(
     canonical_team_id: str,
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[TeamStrengthOut]:
     team = db.query(Team).filter_by(canonical_team_id=canonical_team_id).first()
     if team is None:
@@ -280,6 +393,7 @@ def list_models(
     model_name: str | None = Query(default=None),
     status: str | None = Query(default=None, description="ENABLED / DISABLED / RETIRED / CHAMPION / CHALLENGER"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[ModelVersionSummaryOut]:
     query = db.query(ModelVersion).outerjoin(Competition, ModelVersion.competition_id == Competition.id)
     if competition:
@@ -311,8 +425,8 @@ def list_models(
 
 
 @app.get("/models/{version}", response_model=ModelVersionDetailOut)
-def get_model(version: str, db: Session = Depends(get_db)) -> ModelVersionDetailOut:
-    """Includes raw fitted parameters — administrator-only once auth (Phase 10) exists."""
+def get_model(version: str, db: Session = Depends(get_db), user: User = Depends(_ADMIN_OR_ANALYST)) -> ModelVersionDetailOut:
+    """Includes raw fitted parameters — ADMIN/ANALYST only (section 54)."""
     row = (
         db.query(ModelVersion, Competition.canonical_competition_id)
         .outerjoin(Competition, ModelVersion.competition_id == Competition.id)
@@ -342,6 +456,7 @@ def get_model(version: str, db: Session = Depends(get_db)) -> ModelVersionDetail
 def model_performance(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[ModelPerformanceOut]:
     """Walk-forward backtest performance (sections 35/36): pooled
     out-of-sample metrics across every fold, not a single train/validation
@@ -385,9 +500,12 @@ def monitoring(
     metric_name: str | None = Query(default=None, description="e.g. team_strength_drift, feature_drift_psi, probability_drift_js, scoring_environment_drift"),
     breached_only: bool = Query(default=False),
     db: Session = Depends(get_db),
+    user: User = Depends(_ADMIN_OR_ANALYST),
 ) -> list[MonitoringOut]:
     """Model/data drift history (section 42) — every check ever run is kept,
-    so this is a real time series rather than a single latest snapshot."""
+    so this is a real time series rather than a single latest snapshot.
+    ADMIN/ANALYST only: this is internal operational data, not a
+    consumer-facing forecast diagnostic."""
     query = (
         db.query(ModelMonitoring, ModelVersion, Competition.canonical_competition_id)
         .join(ModelVersion, ModelMonitoring.model_version_id == ModelVersion.id)
@@ -425,6 +543,7 @@ def backtests(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     model_name: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[BacktestOut]:
     """Full walk-forward backtest detail (sections 35-36) — every fold's
     pooled out-of-sample performance, including exact-scoreline probability
@@ -472,6 +591,7 @@ def backtests(
 def calibration(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> list[CalibrationOut]:
     """Probability-calibration diagnostics (section 37) — Brier score, log
     loss, RPS, expected calibration error and a reliability curve, measured
@@ -615,6 +735,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
 def forecast(
     fixture: str = Query(..., description="canonical_fixture_id"),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> MatchForecastOut:
     """Generates a NEW forecast and registers it (section 46: predictions are
     never silently overwritten — this always creates a new Prediction row,
@@ -634,7 +755,9 @@ def forecast(
 
 
 @app.get("/predictions/{canonical_fixture_id}", response_model=MatchForecastOut)
-def get_prediction(canonical_fixture_id: str, db: Session = Depends(get_db)) -> MatchForecastOut:
+def get_prediction(
+    canonical_fixture_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> MatchForecastOut:
     """Returns the most recent registered prediction for a fixture without
     generating a new one — use POST /forecast to (re)generate."""
     fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
@@ -652,7 +775,9 @@ def get_prediction(canonical_fixture_id: str, db: Session = Depends(get_db)) -> 
 
 
 @app.get("/predictions/{canonical_fixture_id}/distribution")
-def get_prediction_distribution(canonical_fixture_id: str, db: Session = Depends(get_db)) -> dict:
+def get_prediction_distribution(
+    canonical_fixture_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> dict:
     """The full underlying probability distribution — the score matrix and
     goal distribution — rather than the summarized top-N scorelines."""
     fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
@@ -674,14 +799,16 @@ def get_prediction_distribution(canonical_fixture_id: str, db: Session = Depends
 
 
 @app.post("/sync", response_model=SyncReportOut)
-def sync(db: Session = Depends(get_db)) -> SyncReportOut:
+def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> SyncReportOut:
     """Runs the full pipeline (section 51): discovery, team mapping,
     fixture/result sync, promotion/relegation detection, data quality
     scoring, league baselines, model eligibility, Dixon-Coles/Poisson/
     hierarchical/first-half/corners/cards/xG training, walk-forward
     backtesting, ensemble weighting and calibration — then returns the
     section-63 synchronization report as structured data (see also
-    `render_sync_report` for the human-readable text version)."""
+    `render_sync_report` for the human-readable text version). ADMIN only
+    and always audit-logged: this is expensive, writes to the database, and
+    (for a live provider) makes outbound API calls."""
     settings = get_settings()
     provider = get_provider(settings)
     try:
@@ -690,6 +817,8 @@ def sync(db: Session = Depends(get_db)) -> SyncReportOut:
         close = getattr(provider, "close", None)
         if callable(close):
             close()
+    record_audit(db, actor, "TRIGGER_FULL_SYNC", resource_type="sync", details={"provider": report.provider, "system_status": report.system_status})
+    db.commit()
     return SyncReportOut(
         provider=report.provider,
         started_at=report.started_at,
