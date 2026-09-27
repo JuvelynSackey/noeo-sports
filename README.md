@@ -29,12 +29,15 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 9 — Model/data drift detection and out-of-distribution flagging.**
 - **Phase 10 — Authentication, role-based access control, and audit logging.**
 - **Phase 11 — Champion/challenger deployment and rollback.**
+- **Phase 12 — Testing hardening and production deployment.**
 
-Everything else in the roadmap (production hardening) is **not yet
-implemented**. The schema for most of it already exists (see
-`app/database/models/`) so later phases can build on stable tables without
-re-migrating, but the business logic behind those tables is still to come.
-Note on scope: "administrator dashboard" in the roadmap is
+Every phase in the roadmap now has an initial implementation. That means
+"feature-complete against the 12-phase plan," not "battle-tested in
+production" — see the **Testing hardening and production deployment**
+section below for what Phase 12 actually covers and, just as importantly,
+what it explicitly does not (load testing, a live run against a real
+provider over time, multi-instance scaling of the scheduler). Note on
+scope: "administrator dashboard" in the roadmap is
 delivered here as a secured, role-gated **API** (the diagnostics endpoints
 built in Phases 6-9, now behind auth) rather than a separate browser
 front-end — consistent with every prior phase, which is API-only with no UI
@@ -83,7 +86,9 @@ Run tests:
 pytest -q
 ```
 
-Run with Docker (Postgres + app):
+Run with Docker (Postgres + app; both containers have a healthcheck against
+`/system-health`, and the app runs as a non-root user — see **Testing
+hardening and production deployment** below):
 
 ```bash
 docker compose up --build
@@ -119,11 +124,13 @@ changes.
 ```
 app/
   api/            FastAPI app (health, auth/users/audit-logs, competitions,
-                  teams, fixtures, data-quality, models, model-performance,
-                  backtests, calibration, league-parameters, team-strength,
-                  forecast/predictions, sync, monitoring); its lifespan
-                  starts the background scheduler when enabled
+                  teams, fixtures, data-quality, models (+ rollback),
+                  model-performance, backtests, calibration, league-parameters,
+                  team-strength, forecast/predictions, sync, monitoring);
+                  its lifespan starts the background scheduler when enabled
+                  and runs the Phase 12 production-safety check
     deps.py        get_current_user / require_roles — JWT auth + RBAC dependencies
+    middleware.py   request-id + structured access-log line per request (section 12)
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -176,6 +183,7 @@ app/
     scheduler.py                 optional background full-sync on a fixed interval (section 13/64)
     auth.py                     password hashing (bcrypt) + JWT issuance/verification (section 54)
     audit.py                     append-only AuditLog writer for sensitive administrative actions
+    rate_limiter.py              in-memory sliding-window limiter behind POST /auth/token
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
 
@@ -189,7 +197,11 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   backtesting, ensemble, calibration, sync report, scheduler,
                   forecast service, full-sync orchestration, drift metrics,
                   drift detection, OOD detection, auth service, API auth/RBAC,
-                  champion/challenger gate, DB constraints)
+                  champion/challenger gate, rate limiter, API hardening,
+                  DB constraints)
+
+.github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
+                               every push/PR to main (Phase 12)
 ```
 
 ### Database
@@ -654,6 +666,78 @@ still promoted immediately on every retrain.
    model's persisted `parameters` directly, which only change when a
    challenger is actually promoted).
 
+### Testing hardening and production deployment (Phase 12)
+
+1. **CI** (`.github/workflows/tests.yml`) — every push and pull request
+   against `main` installs `requirements.txt` and runs the full pytest
+   suite (203+ tests) against the mock provider, so a regression is caught
+   before it merges rather than discovered later. This is the first point
+   in the project where tests run anywhere other than a developer's own
+   machine.
+2. **Startup safety check** (`app/api/main.py::_check_production_safety`,
+   run from the FastAPI `lifespan`) — refuses to start if
+   `ENVIRONMENT=production` and `SECRET_KEY` is still the insecure
+   `change-me-in-production` default, since a wrong environment variable
+   should fail loudly at boot, not be discovered later as a live security
+   incident. It also logs (non-fatally) if `DATABASE_URL` is still SQLite
+   in production, since SQLite's single-writer model is a poor fit for
+   concurrent production traffic even though it's fine for development.
+3. **Login rate limiting** (`app/services/rate_limiter.py`) — `POST
+   /auth/token` tracks failed attempts per client IP in a sliding window
+   (`login_rate_limit_attempts` / `login_rate_limit_window_seconds`) and
+   returns `429` once exceeded; a successful login clears that client's
+   count. This is explicitly a single-process, in-memory best effort, not
+   a distributed limiter — running multiple API worker processes multiplies
+   the effective limit by the worker count, and a real multi-instance
+   deployment should replace this with a shared store (e.g. Redis) instead
+   of just raising the numbers here.
+4. **CORS** — closed by default (`cors_allowed_origins: []`, no
+   `CORSMiddleware` even installed), since this API has no first-party
+   browser frontend of its own; a deployment that needs one sets
+   `CORS_ALLOWED_ORIGINS` to a JSON array of allowed origins.
+5. **Request logging** (`app/api/middleware.py::RequestLoggingMiddleware`)
+   — every request gets a short id, bound into `structlog`'s contextvars so
+   every log line emitted anywhere while handling that request carries the
+   same id, plus a single structured `request_completed`/`request_failed`
+   access-log line (method, path, status, duration) and an `X-Request-ID`
+   response header for correlating a client-reported issue back to server
+   logs. This also fixed a real gap: `app/api/main.py` was the only entry
+   point in the whole project that never called `configure_logging()`, so
+   the API process was never actually emitting the structured JSON logs
+   `app/logging_config.py` sets up — every script (`scripts/*.py`) already
+   did.
+6. **Graceful `/system-health` degradation** — the database queries it runs
+   are now wrapped in a try/except for `SQLAlchemyError`, returning
+   `status: "ERROR"` with a `detail` message instead of letting an
+   unhandled exception 500 the one endpoint that exists specifically so a
+   load balancer or container orchestrator can detect a database outage.
+   It still requires no authentication, since a health probe can't be
+   expected to hold a bearer token.
+7. **Docker** — `Dockerfile` now runs as a non-root user and declares a
+   `HEALTHCHECK` against `/system-health`; `docker-compose.yml` runs the
+   full stack (Postgres + the API, migrations applied automatically on
+   container start) for local end-to-end testing. Both are deliberately
+   single-process: the background scheduler and the login rate limiter
+   both hold in-process state, so this image should be scaled by running
+   multiple container **replicas** (with `SCHEDULER_ENABLED=true` on at
+   most one of them), not by adding `uvicorn`/`gunicorn` workers inside one
+   container — `gunicorn` is included in `requirements.txt` as an available
+   process-supervisor option (`gunicorn -k uvicorn.workers.UvicornWorker
+   --workers 1 app.api.main:app`) for whoever wants graceful-restart
+   behavior, but isn't wired in as the default command.
+8. **What Phase 12 explicitly does not cover** — this is "hardened for a
+   single, correctly-configured production instance," not a claim of
+   having been run in production. Specifically out of scope: load/stress
+   testing, a sustained live run against a real provider
+   (`football_data_org`) over weeks to see how sync behaves against real
+   API rate limits and data quirks, horizontal scaling of the scheduler
+   itself (today it's "run at most one replica with it enabled," not a
+   distributed job queue), TLS termination (expected to be handled by a
+   reverse proxy or platform load balancer in front of this container, not
+   by the app itself), and secret management/rotation (`SECRET_KEY` is
+   read from an environment variable; injecting it securely is a
+   deployment-platform concern, not something this codebase does for you).
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -667,7 +751,7 @@ still promoted immediately on every retrain.
 9. **Monitoring + drift detection + OOD detection** — done
 10. **Administrator dashboard (API) + authentication/RBAC** — done
 11. **Champion/challenger deployment + rollback** — done
-12. Testing hardening + production deployment
+12. **Testing hardening + production deployment** — done
 
 ## Safety & integrity
 

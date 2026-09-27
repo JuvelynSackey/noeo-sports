@@ -24,10 +24,24 @@ services:
       DATABASE_URL: postgresql+psycopg://football:football@db:5432/football_prediction
       DATA_PROVIDER: mock
       LOG_LEVEL: INFO
+      # This compose file is a local/demo setup (hardcoded DB credentials,
+      # mock provider) — ENVIRONMENT stays "development" so the startup
+      # safety check in app/api/main.py doesn't refuse to boot over the
+      # placeholder SECRET_KEY below. A real deployment sets ENVIRONMENT=
+      # production and supplies SECRET_KEY from a secret store, never
+      # committed here.
+      ENVIRONMENT: development
+      SECRET_KEY: change-me-in-production
     ports:
       - "8000:8000"
     command: >
       sh -c "alembic upgrade head && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/system-health').getcode()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
 
 volumes:
   pgdata:

@@ -16,6 +16,10 @@ APP_VERSION = "0.4.0"
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
+    # Deployment (Phase 12) — "production" gates the startup safety checks in
+    # app/api/main.py (e.g. refusing to boot with the default secret_key).
+    environment: str = "development"
+
     # Database
     database_url: str = "sqlite:///./football_prediction.db"
 
@@ -38,6 +42,16 @@ class Settings(BaseSettings):
     # Auth
     secret_key: str = "change-me-in-production"
     access_token_expire_minutes: int = 60
+
+    # API hardening (Phase 12) — CORS is opt-in (empty = no cross-origin
+    # browser access at all, since this API has no first-party frontend of
+    # its own); the login rate limit is a single-process, in-memory best
+    # effort (see app/services/rate_limiter.py) rather than a distributed
+    # one, sized for the common single-instance deployment this project
+    # targets.
+    cors_allowed_origins: list[str] = []
+    login_rate_limit_attempts: int = 10
+    login_rate_limit_window_seconds: int = 60
 
     # Data quality thresholds (section 14/15) — defaults, tunable per deployment
     min_data_quality_for_full_ensemble: float = 0.75

@@ -17,12 +17,15 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
+from app.api.middleware import RequestLoggingMiddleware
 from app.api.schemas import (
     AdministratorNotesOut,
     AuditLogOut,
@@ -72,23 +75,51 @@ from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
+from app.logging_config import configure_logging, get_logger
 from app.services import model_version_registry
 from app.services.audit import record_audit
 from app.services.auth import authenticate_user, create_access_token, hash_password
 from app.services.forecast_service import ForecastService
+from app.services.rate_limiter import RateLimiter
 from app.services.scheduler import JOB_ID, create_scheduler
 from app.services.sync_orchestrator import FullSyncService
+
+configure_logging()  # app/logging_config.py's structured JSON setup — every other
+# entry point (scripts/*) already called this; the API itself never did.
+logger = get_logger(__name__)
 
 _ADMIN_ONLY = require_roles(UserRole.ADMIN)
 _ADMIN_OR_ANALYST = require_roles(UserRole.ADMIN, UserRole.ANALYST)
 
 _scheduler = None  # set by lifespan when settings.scheduler_enabled; read by /system-health
+_login_limiter: RateLimiter | None = None  # set by lifespan from settings; see rate_limiter.py
+
+
+def _check_production_safety(settings) -> None:
+    """Fails fast at startup rather than silently running an insecure
+    configuration in production — a wrong environment variable should be
+    loud immediately, not discovered later as a security incident."""
+    if settings.environment != "production":
+        return
+    if settings.secret_key == "change-me-in-production":
+        raise RuntimeError(
+            "SECRET_KEY is still the insecure default while ENVIRONMENT=production. "
+            "Set a real secret before starting the API in production."
+        )
+    if settings.database_url.startswith("sqlite"):
+        logger.warning(
+            "sqlite_in_production",
+            message="DATABASE_URL is SQLite while ENVIRONMENT=production; "
+            "PostgreSQL is recommended for concurrent production workloads.",
+        )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scheduler
+    global _scheduler, _login_limiter
     settings = get_settings()
+    _check_production_safety(settings)
+    _login_limiter = RateLimiter(settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds)
     if settings.scheduler_enabled:
         _scheduler = create_scheduler(settings)
         _scheduler.start()
@@ -96,6 +127,7 @@ async def lifespan(app: FastAPI):
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+    _login_limiter = None
 
 
 app = FastAPI(
@@ -108,20 +140,43 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestLoggingMiddleware)
+
+_cors_origins = get_settings().cors_allowed_origins
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 
 @app.get("/system-health", response_model=SystemHealthOut)
 def system_health(db: Session = Depends(get_db)) -> SystemHealthOut:
+    """Deliberately does not require authentication (load balancers and
+    container orchestrators need to probe this without credentials) and
+    never raises on a database problem — a health check that 500s on the
+    exact condition it exists to detect is worse than useless."""
     settings = get_settings()
-    total = db.query(func.count(Competition.id)).scalar() or 0
-    active = (
-        db.query(func.count(Competition.id)).filter(Competition.status == CompetitionStatus.ACTIVE).scalar() or 0
-    )
+    try:
+        total = db.query(func.count(Competition.id)).scalar() or 0
+        active = (
+            db.query(func.count(Competition.id)).filter(Competition.status == CompetitionStatus.ACTIVE).scalar() or 0
+        )
+        status_value, detail = "OK", None
+    except SQLAlchemyError as exc:
+        logger.error("system_health_database_unreachable", error=str(exc))
+        total, active, status_value, detail = 0, 0, "ERROR", "database unreachable"
+
     next_sync = None
     if _scheduler is not None:
         job = _scheduler.get_job(JOB_ID)
         next_sync = job.next_run_time if job else None
     return SystemHealthOut(
-        status="OK",
+        status=status_value,
+        detail=detail,
         data_provider=settings.data_provider,
         competitions_total=total,
         active_competitions=active,
@@ -132,13 +187,21 @@ def system_health(db: Session = Depends(get_db)) -> SystemHealthOut:
 
 
 @app.post("/auth/token", response_model=TokenOut)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> TokenOut:
+def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)) -> TokenOut:
     """OAuth2 password flow (section 54). Deliberately returns the same 401
     for an unknown email, a disabled account, and a wrong password, so a
-    caller can never use this endpoint to enumerate valid accounts."""
+    caller can never use this endpoint to enumerate valid accounts. Rate
+    limited per client IP (section 12 hardening — see rate_limiter.py for
+    why this is a single-process best effort, not a hard guarantee)."""
+    client_host = request.client.host if request.client else "unknown"
+    if _login_limiter is not None and not _login_limiter.check(f"login:{client_host}"):
+        raise HTTPException(status_code=429, detail="Too many login attempts. Try again shortly.")
+
     user = authenticate_user(db, form_data.username, form_data.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Incorrect email or password", headers={"WWW-Authenticate": "Bearer"})
+    if _login_limiter is not None:
+        _login_limiter.reset(f"login:{client_host}")
     settings = get_settings()
     token, expires_at = create_access_token(settings, user=user)
     return TokenOut(

@@ -85,6 +85,7 @@ class SyncReportOut(BaseModel):
 
 class SystemHealthOut(BaseModel):
     status: str
+    detail: str | None = None
     data_provider: str
     competitions_total: int
     active_competitions: int
