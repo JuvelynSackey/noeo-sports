@@ -73,6 +73,7 @@ class SyncReportOut(BaseModel):
     new_results: int
     data_quality_summary: dict[str, str]
     movements: MovementReportOut | None
+    champion_challenger_decisions: list[str]
     models_activated: list[str]
     models_disabled: list[str]
     models_requiring_review: list[str]

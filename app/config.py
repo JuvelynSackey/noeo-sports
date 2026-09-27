@@ -117,6 +117,16 @@ class Settings(BaseSettings):
     drift_min_predictions_for_probability_drift: int = 10
     drift_js_divergence_threshold: float = 0.1
 
+    # Champion/challenger deployment gate (section 11's staged-rollout
+    # requirement) — dixon_coles/poisson_baseline/hierarchical_model only,
+    # the same scope Phase 7 backtesting settled on. A retrain is only
+    # promoted over the current champion if it doesn't meaningfully regress
+    # on matches completed since the champion's own training window ended;
+    # too few of those (a rerun with no new results, or no champion yet)
+    # promotes unconditionally, since there's nothing to compare against.
+    champion_challenger_min_new_matches: int = 5
+    champion_challenger_log_loss_tolerance: float = 0.02
+
 
 @lru_cache
 def get_settings() -> Settings:

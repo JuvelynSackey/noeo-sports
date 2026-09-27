@@ -28,12 +28,13 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 8 — Automatic synchronization report + scheduling.**
 - **Phase 9 — Model/data drift detection and out-of-distribution flagging.**
 - **Phase 10 — Authentication, role-based access control, and audit logging.**
+- **Phase 11 — Champion/challenger deployment and rollback.**
 
-Everything else in the roadmap (champion/challenger deployment, production
-hardening) is **not yet implemented**. The schema for most of it already
-exists (see `app/database/models/`) so later phases can build on stable
-tables without re-migrating, but the business logic behind those tables is
-still to come. Note on scope: "administrator dashboard" in the roadmap is
+Everything else in the roadmap (production hardening) is **not yet
+implemented**. The schema for most of it already exists (see
+`app/database/models/`) so later phases can build on stable tables without
+re-migrating, but the business logic behind those tables is still to come.
+Note on scope: "administrator dashboard" in the roadmap is
 delivered here as a secured, role-gated **API** (the diagnostics endpoints
 built in Phases 6-9, now behind auth) rather than a separate browser
 front-end — consistent with every prior phase, which is API-only with no UI
@@ -154,8 +155,11 @@ app/
     data_quality.py             completeness/freshness/reliability scoring + lifecycle updates
     league_parameters.py        league scoring-environment baselines + shrinkage (section 16)
     model_eligibility.py        which models can run for a competition, and why not (section 17)
-    model_version_registry.py   shared ModelVersion persist/retire/disable logic
-    model_training.py           fits/persists Dixon-Coles + Poisson + hierarchical per competition
+    model_version_registry.py   shared ModelVersion persist/retire/disable/stage/promote logic
+    model_training.py           fits Dixon-Coles + Poisson + hierarchical per competition and
+                                 runs each through the champion/challenger gate (section 11)
+    champion_challenger.py       promotion gate: a retrain is only promoted over the current
+                                 champion if it doesn't regress on matches completed since
     hierarchical_shrinkage.py   per-team partial-pooling shrinkage of attack/defence (section 22)
     market_models.py            first-half/corners/cards models, reusing the goal-model engine
     xg_model.py                 xG-based expected goals (ratio model; DATA_UNAVAILABLE-aware)
@@ -185,7 +189,7 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   backtesting, ensemble, calibration, sync report, scheduler,
                   forecast service, full-sync orchestration, drift metrics,
                   drift detection, OOD detection, auth service, API auth/RBAC,
-                  DB constraints)
+                  champion/challenger gate, DB constraints)
 ```
 
 ### Database
@@ -584,6 +588,72 @@ to satisfy sections 34-37.
    as buggy (it probes a `bcrypt.__about__` module that newer bcrypt
    removed), so `requirements.txt` pins `bcrypt==4.0.1`.
 
+### Champion/challenger deployment and rollback (Phase 11)
+
+Before this phase, every retrain unconditionally replaced the live
+(`ENABLED`) model — `model_training.py` fit fresh parameters and
+immediately retired whatever was live in favor of them, on every sync, with
+no check that the new fit was actually as good. Scope, as in Phase 7, is
+the three goal-based candidates ensembling already covers (`dixon_coles`,
+`poisson_baseline`, `hierarchical_model`); corners/cards/first-half/xG are
+still promoted immediately on every retrain.
+
+1. **Staging** — a retrain (`model_training.py`) now calls
+   `registry.stage_challenger()` (`app/services/model_version_registry.py`)
+   instead of persisting straight to `ENABLED`: the new fit lands as
+   `CHALLENGER`, and any earlier, never-promoted `CHALLENGER` for the same
+   model/competition is retired (superseded), never deleted.
+2. **The fairness problem** — the obvious approach, comparing the
+   challenger against the champion on some recent slice of matches, is
+   unfair if the challenger's own training data already includes those
+   matches: it would just be "grading its own homework." Instead,
+   `champion_challenger.py::split_by_champion_cutoff()` splits all
+   completed matches on the **champion's own `training_window_end`**
+   (recorded when it was promoted): everything up to that point is what the
+   champion already saw; everything after is matches it has genuinely never
+   seen. The challenger is evaluated with a *second*, eval-only fit trained
+   on that same "already seen" subset — so both sides are judged purely on
+   matches neither was trained on — while the version actually staged and
+   potentially promoted is the challenger's full fit (all current data),
+   so a promotion doesn't leave the newest results out of production.
+3. **The decision** (`ChampionChallengerService.evaluate_and_promote`,
+   section 11) — with no existing champion, or fewer than
+   `champion_challenger_min_new_matches` matches completed since the
+   champion's training window ended, there's nothing fair to compare
+   against, so the challenger is promoted unconditionally
+   (`PROMOTED_NO_CHAMPION` / `PROMOTED_INSUFFICIENT_EVIDENCE`) — this is
+   also what makes a same-day rerun with no new results still replace the
+   live version, exactly as before this phase. Otherwise, both the
+   champion's frozen parameters and the challenger's eval-only fit are
+   scored (mean log loss) against the actual results of those new matches;
+   the challenger is `PROMOTED` if it doesn't come out worse than the
+   champion by more than `champion_challenger_log_loss_tolerance` (absorbs
+   ordinary fitting noise), otherwise it's `REJECTED` — the champion stays
+   live, and the challenger is retired with the reason recorded on its own
+   `ModelVersion.disabled_reason`.
+4. **Visibility** — every decision logs a `MODEL_PROMOTED` or
+   `MODEL_CHALLENGER_REJECTED` `SystemEvent`, is listed under a new
+   "Champion/challenger decisions" line in the section-63 sync report
+   (`sync_report.py`, `SyncReportOut.champion_challenger_decisions`), and a
+   `REJECTED` decision is also added to `models_requiring_review` (worth a
+   human glancing at — most often means the newest data looks off, not that
+   the gate malfunctioned).
+5. **Rollback** — `POST /models/{version}/rollback` (ADMIN only,
+   audit-logged as `ROLLBACK_MODEL_VERSION`) manually promotes any specific
+   past version — typically a `RETIRED` one — back to `ENABLED`, retiring
+   whatever is currently live for that model/competition exactly like an
+   automatic promotion does. This is the human override for when the
+   automatic gate's call needs to be reversed, or a since-discovered issue
+   in the current champion needs an immediate rollback; like every other
+   status change here, nothing is ever deleted, so a rollback is itself
+   reversible.
+6. **What this doesn't do**: `TeamStrength` (attack/defence/recent-form
+   display data, section 23) is still recomputed from the full retrain on
+   every sync regardless of the promotion outcome — it's informational, not
+   what `forecast_service` actually scores matches with (that reads a
+   model's persisted `parameters` directly, which only change when a
+   challenger is actually promoted).
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -596,7 +666,7 @@ to satisfy sections 34-37.
 8. **Automatic league/season synchronization (fixtures, results, full sync report)** — done
 9. **Monitoring + drift detection + OOD detection** — done
 10. **Administrator dashboard (API) + authentication/RBAC** — done
-11. Champion/challenger deployment + rollback
+11. **Champion/challenger deployment + rollback** — done
 12. Testing hardening + production deployment
 
 ## Safety & integrity

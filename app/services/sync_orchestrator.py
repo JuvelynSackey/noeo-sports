@@ -71,6 +71,7 @@ class FullSyncReport:
     ensemble_training: dict[str, EnsembleTrainingReport] = field(default_factory=dict)
     calibration_training: dict[str, CalibrationTrainingReport] = field(default_factory=dict)
     drift: dict[str, DriftReport] = field(default_factory=dict)
+    champion_challenger_decisions: list[str] = field(default_factory=list)
     models_activated: list[str] = field(default_factory=list)
     models_disabled: list[str] = field(default_factory=list)
     models_requiring_review: list[str] = field(default_factory=list)
@@ -173,7 +174,16 @@ class FullSyncService:
         # Model training (and the additional-market models below) aggregate
         # across every season currently synced for this competition, so they
         # run once per competition rather than inside the per-season loop above.
-        report.model_training[competition.canonical_competition_id] = ModelTrainingService(self.db).train(competition)
+        training_report = ModelTrainingService(self.db).train(competition)
+        report.model_training[competition.canonical_competition_id] = training_report
+        for decision in training_report.champion_challenger.values():
+            report.champion_challenger_decisions.append(
+                f"{competition.canonical_competition_id}:{decision.model_name}: {decision.decision} — {decision.reason}"
+            )
+            if decision.decision == "REJECTED":
+                report.models_requiring_review.append(
+                    f"{competition.canonical_competition_id}:{decision.model_name} (challenger rejected: {decision.reason})"
+                )
 
         market_service = MarketModelTrainingService(self.db)
         market_service.train_first_half(competition)

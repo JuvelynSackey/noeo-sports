@@ -63,7 +63,7 @@ from app.data.providers import get_provider
 from app.database.base import get_db
 from app.database.models.audit import AuditLog, User
 from app.database.models.competitions import Competition, Season
-from app.database.models.enums import CompetitionStatus, UserRole
+from app.database.models.enums import CompetitionStatus, ModelStatus, UserRole
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
@@ -72,6 +72,7 @@ from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
+from app.services import model_version_registry
 from app.services.audit import record_audit
 from app.services.auth import authenticate_user, create_access_token, hash_password
 from app.services.forecast_service import ForecastService
@@ -424,18 +425,7 @@ def list_models(
     return out
 
 
-@app.get("/models/{version}", response_model=ModelVersionDetailOut)
-def get_model(version: str, db: Session = Depends(get_db), user: User = Depends(_ADMIN_OR_ANALYST)) -> ModelVersionDetailOut:
-    """Includes raw fitted parameters — ADMIN/ANALYST only (section 54)."""
-    row = (
-        db.query(ModelVersion, Competition.canonical_competition_id)
-        .outerjoin(Competition, ModelVersion.competition_id == Competition.id)
-        .filter(ModelVersion.version == version)
-        .first()
-    )
-    if row is None:
-        raise HTTPException(status_code=404, detail="Model version not found")
-    mv, comp_canonical = row
+def _to_model_version_detail(mv: ModelVersion, comp_canonical: str | None) -> ModelVersionDetailOut:
     return ModelVersionDetailOut(
         model_name=mv.model_name,
         version=mv.version,
@@ -450,6 +440,64 @@ def get_model(version: str, db: Session = Depends(get_db), user: User = Depends(
         hyperparameters=mv.hyperparameters,
         parameters=mv.parameters,
     )
+
+
+@app.get("/models/{version}", response_model=ModelVersionDetailOut)
+def get_model(version: str, db: Session = Depends(get_db), user: User = Depends(_ADMIN_OR_ANALYST)) -> ModelVersionDetailOut:
+    """Includes raw fitted parameters — ADMIN/ANALYST only (section 54)."""
+    row = (
+        db.query(ModelVersion, Competition.canonical_competition_id)
+        .outerjoin(Competition, ModelVersion.competition_id == Competition.id)
+        .filter(ModelVersion.version == version)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    mv, comp_canonical = row
+    return _to_model_version_detail(mv, comp_canonical)
+
+
+@app.post("/models/{version}/rollback", response_model=ModelVersionDetailOut)
+def rollback_model(version: str, db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> ModelVersionDetailOut:
+    """Manually promotes a specific, previously-trained version back to
+    ENABLED (section 11) — the escape hatch for when the champion/challenger
+    gate's automatic decision (or a since-discovered issue in the current
+    champion) needs to be overridden by a human. ADMIN only, and always
+    audit-logged. Retires whatever is currently ENABLED for that
+    model/competition, exactly like a normal promotion — the record being
+    rolled back from is kept, never deleted, so this is itself reversible."""
+    row = (
+        db.query(ModelVersion, Competition)
+        .join(Competition, ModelVersion.competition_id == Competition.id)
+        .filter(ModelVersion.version == version)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=404, detail="Model version not found")
+    mv, competition = row
+    if mv.status == ModelStatus.ENABLED:
+        raise HTTPException(status_code=400, detail="This version is already the live (ENABLED) one")
+
+    previous_champion = (
+        db.query(ModelVersion)
+        .filter_by(model_name=mv.model_name, competition_id=competition.id, status=ModelStatus.ENABLED)
+        .first()
+    )
+    model_version_registry.promote(db, mv.model_name, competition, mv.version)
+    record_audit(
+        db,
+        actor,
+        "ROLLBACK_MODEL_VERSION",
+        resource_type="model_version",
+        resource_id=mv.version,
+        details={
+            "model_name": mv.model_name,
+            "competition": competition.canonical_competition_id,
+            "previous_champion": previous_champion.version if previous_champion else None,
+        },
+    )
+    db.commit()
+    return _to_model_version_detail(mv, competition.canonical_competition_id)
 
 
 @app.get("/model-performance", response_model=list[ModelPerformanceOut])
@@ -832,6 +880,7 @@ def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> S
         new_results=report.new_results,
         data_quality_summary=report.data_quality_summary,
         movements=MovementReportOut.model_validate(report.movements) if report.movements else None,
+        champion_challenger_decisions=report.champion_challenger_decisions,
         models_activated=report.models_activated,
         models_disabled=report.models_disabled,
         models_requiring_review=report.models_requiring_review,

@@ -44,6 +44,9 @@ def render_sync_report(report: FullSyncReport) -> str:
     lines.append(f"Models requiring review: {len(report.models_requiring_review)}")
     for name in report.models_requiring_review:
         lines.append(f"  - {name}")
+    lines.append(f"Champion/challenger decisions: {len(report.champion_challenger_decisions)}")
+    for name in report.champion_challenger_decisions:
+        lines.append(f"  - {name}")
     lines.append("")
     lines.append(f"Provider errors: {len(report.provider_errors)}")
     for e in report.provider_errors:

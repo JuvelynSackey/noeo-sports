@@ -15,7 +15,7 @@ teams with few matches played than the raw MLE does.
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from sqlalchemy.orm import Session
 
@@ -26,9 +26,10 @@ from app.database.models.fixtures import Fixture, Result
 from app.database.models.teams import Team
 from app.logging_config import get_logger
 from app.models.goal_model import GoalMatchRecord, GoalModel, GoalModelFit
-from app.services import model_version_registry as registry
+from app.services.champion_challenger import ChampionChallengerDecision, ChampionChallengerService, get_champion, split_by_champion_cutoff
 from app.services.hierarchical_shrinkage import shrink_fit
 from app.services.model_eligibility import EligibilityReport, ModelEligibilityService
+from app.services import model_version_registry as registry
 from app.services.team_strength import TeamStrengthService
 
 logger = get_logger(__name__)
@@ -49,6 +50,7 @@ class ModelTrainingReport:
     n_teams: int = 0
     team_strength_rows: int = 0
     skipped_reason: str | None = None
+    champion_challenger: dict[str, ChampionChallengerDecision] = field(default_factory=dict)
 
 
 class ModelTrainingService:
@@ -90,29 +92,60 @@ class ModelTrainingService:
         team_ids = [teams_by_id[tid].canonical_team_id for tid in team_row_ids]
         index_of = {row_id: i for i, row_id in enumerate(team_row_ids)}
 
-        matches = [
-            GoalMatchRecord(index_of[f.home_team_id], index_of[f.away_team_id], r.home_goals, r.away_goals)
-            for f, r in completed
-        ]
+        def to_record(f: Fixture, r: Result) -> GoalMatchRecord:
+            return GoalMatchRecord(index_of[f.home_team_id], index_of[f.away_team_id], r.home_goals, r.away_goals)
+
+        matches = [to_record(f, r) for f, r in completed]
         kickoff_window = (min(kickoffs) if kickoffs else None, max(kickoffs) if kickoffs else None)
+
+        gate = ChampionChallengerService(self.db, self.settings)
+
+        # Every candidate is evaluated against a "fair" eval-fit trained only
+        # on what its own champion was already trained on (excluding matches
+        # completed since) — see champion_challenger.py for why this, rather
+        # than the champion's frozen parameters alone, is the right baseline
+        # to compare a full retrain against.
+        dc_champion = get_champion(self.db, competition, DIXON_COLES)
+        dc_eval_rows, dc_holdout = split_by_champion_cutoff(completed, teams_by_id, dc_champion)
+        dc_eval_matches = [to_record(f, r) for f, r in dc_eval_rows]
 
         dc_model = GoalModel(use_dc_adjustment=True, l2_regularization=self.settings.model_l2_regularization)
         dc_fit = dc_model.fit(team_ids, matches, estimate_uncertainty=True)
-        report.dixon_coles_version = registry.persist_goal_fit(
-            self.db, self.settings, DIXON_COLES, competition, dc_fit, *kickoff_window, use_dc_adjustment=True
+        dc_eval_fit = dc_model.fit(team_ids, dc_eval_matches) if dc_eval_matches and dc_holdout else None
+        dc_decision = gate.evaluate_and_promote(
+            competition, DIXON_COLES, True, dc_champion, dc_fit, dc_eval_fit, dc_holdout, *kickoff_window
         )
+        report.dixon_coles_version = dc_decision.version
+        report.champion_challenger[DIXON_COLES] = dc_decision
+
+        poisson_champion = get_champion(self.db, competition, POISSON_BASELINE)
+        poisson_eval_rows, poisson_holdout = split_by_champion_cutoff(completed, teams_by_id, poisson_champion)
+        poisson_eval_matches = [to_record(f, r) for f, r in poisson_eval_rows]
 
         poisson_model = GoalModel(use_dc_adjustment=False, l2_regularization=self.settings.model_l2_regularization)
         poisson_fit = poisson_model.fit(team_ids, matches)
-        report.poisson_version = registry.persist_goal_fit(
-            self.db, self.settings, POISSON_BASELINE, competition, poisson_fit, *kickoff_window, use_dc_adjustment=False
+        poisson_eval_fit = poisson_model.fit(team_ids, poisson_eval_matches) if poisson_eval_matches and poisson_holdout else None
+        poisson_decision = gate.evaluate_and_promote(
+            competition, POISSON_BASELINE, False, poisson_champion, poisson_fit, poisson_eval_fit, poisson_holdout, *kickoff_window
         )
+        report.poisson_version = poisson_decision.version
+        report.champion_challenger[POISSON_BASELINE] = poisson_decision
 
         games_played = self._games_played(team_ids, completed, teams_by_id)
         hierarchical_fit = shrink_fit(dc_fit, games_played, self.settings)
-        report.hierarchical_version = registry.persist_goal_fit(
-            self.db, self.settings, HIERARCHICAL_MODEL, competition, hierarchical_fit, *kickoff_window, use_dc_adjustment=True
+
+        hierarchical_champion = get_champion(self.db, competition, HIERARCHICAL_MODEL)
+        hier_eval_rows, hier_holdout = split_by_champion_cutoff(completed, teams_by_id, hierarchical_champion)
+        hierarchical_eval_fit = None
+        if hier_eval_rows and hier_holdout:
+            hier_eval_matches = [to_record(f, r) for f, r in hier_eval_rows]
+            hier_eval_games_played = self._games_played(team_ids, hier_eval_rows, teams_by_id)
+            hierarchical_eval_fit = shrink_fit(dc_model.fit(team_ids, hier_eval_matches), hier_eval_games_played, self.settings)
+        hierarchical_decision = gate.evaluate_and_promote(
+            competition, HIERARCHICAL_MODEL, True, hierarchical_champion, hierarchical_fit, hierarchical_eval_fit, hier_holdout, *kickoff_window
         )
+        report.hierarchical_version = hierarchical_decision.version
+        report.champion_challenger[HIERARCHICAL_MODEL] = hierarchical_decision
 
         recent_fit: GoalModelFit | None = None
         if eligibility.dynamic_strength.eligible:
@@ -124,6 +157,11 @@ class ModelTrainingService:
                 reason=eligibility.dynamic_strength.reason,
             )
 
+        # Uses the full fit regardless of the champion/challenger outcome
+        # above, deliberately: TeamStrength is informational display data
+        # (section 23), not what forecast_service actually scores matches
+        # with — that reads a model's persisted `parameters` directly, which
+        # only change when a challenger is actually promoted.
         strength_rows = TeamStrengthService(self.db).compute(
             competition, hierarchical_fit, recent_fit, uncertainty_fit=dc_fit, games_played=games_played
         )

@@ -49,6 +49,7 @@ def client():
     session.close()
 
     with TestClient(app) as test_client:
+        test_client.session_factory = session_factory  # exposed for tests that need to seed non-user rows directly
         yield test_client
 
     app.dependency_overrides.pop(get_db, None)
@@ -168,3 +169,73 @@ def test_create_user_rejects_duplicate_email(client):
         "/users", headers=_auth(token), json={"email": "viewer@example.com", "password": "x", "role": "VIEWER"}
     )
     assert r.status_code == 409
+
+
+def _seed_model_versions(client):
+    import datetime as dt
+
+    from app.database.models.competitions import Competition
+    from app.database.models.enums import ModelStatus
+    from app.database.models.modeling import ModelVersion
+
+    db = client.session_factory()
+    competition = Competition(
+        canonical_competition_id="prov:RB", name="Rollback League", source_provider="prov",
+        source_record_id="RB", retrieved_at=dt.datetime.now(dt.timezone.utc),
+    )
+    db.add(competition)
+    db.commit()
+    retired = ModelVersion(
+        model_name="dixon_coles", version="rb-old", status=ModelStatus.RETIRED, competition_id=competition.id,
+        trained_at=dt.datetime.now(dt.timezone.utc), hyperparameters={}, parameters={"attack": {}, "defence": {}},
+        evaluation_metrics={}, is_reproducible=True,
+    )
+    enabled = ModelVersion(
+        model_name="dixon_coles", version="rb-new", status=ModelStatus.ENABLED, competition_id=competition.id,
+        trained_at=dt.datetime.now(dt.timezone.utc), hyperparameters={}, parameters={"attack": {}, "defence": {}},
+        evaluation_metrics={}, is_reproducible=True,
+    )
+    db.add_all([retired, enabled])
+    db.commit()
+    db.close()
+    return "rb-old", "rb-new"
+
+
+def test_admin_can_roll_back_to_a_retired_version(client):
+    old_version, new_version = _seed_model_versions(client)
+    token = _token(client, "admin@example.com", "adminpass")
+
+    r = client.post(f"/models/{old_version}/rollback", headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json()["version"] == old_version
+    assert r.json()["status"] == "ENABLED"
+
+    listing = client.get("/models", headers=_auth(token)).json()
+    by_version = {row["version"]: row["status"] for row in listing}
+    assert by_version[old_version] == "ENABLED"
+    assert by_version[new_version] == "RETIRED"
+
+    audit = client.get("/audit-logs", headers=_auth(token)).json()
+    assert any(row["action"] == "ROLLBACK_MODEL_VERSION" for row in audit)
+
+
+def test_rollback_rejects_already_enabled_version(client):
+    old_version, new_version = _seed_model_versions(client)
+    token = _token(client, "admin@example.com", "adminpass")
+
+    r = client.post(f"/models/{new_version}/rollback", headers=_auth(token))
+    assert r.status_code == 400
+
+
+def test_rollback_is_admin_only(client):
+    old_version, _ = _seed_model_versions(client)
+    viewer_token = _token(client, "viewer@example.com", "viewerpass")
+
+    r = client.post(f"/models/{old_version}/rollback", headers=_auth(viewer_token))
+    assert r.status_code == 403
+
+
+def test_rollback_unknown_version_is_404(client):
+    token = _token(client, "admin@example.com", "adminpass")
+    r = client.post("/models/does-not-exist/rollback", headers=_auth(token))
+    assert r.status_code == 404

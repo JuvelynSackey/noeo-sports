@@ -70,6 +70,27 @@ class GoalModelFit:
     attack_se: dict[str, float] = field(default_factory=dict)
     defence_se: dict[str, float] = field(default_factory=dict)
 
+    @classmethod
+    def from_persisted_parameters(cls, params: dict, metrics: dict | None = None) -> "GoalModelFit":
+        """Reconstructs a fit from a ModelVersion row's stored `parameters`/
+        `evaluation_metrics` JSON — used both to serve live forecasts from a
+        champion model (`forecast_service.py`) and to score a champion's
+        frozen parameters against a challenger's during promotion
+        (`champion_challenger.py`), without needing to refit anything."""
+        metrics = metrics or {}
+        return cls(
+            team_ids=params.get("team_ids", []),
+            attack=params.get("attack", {}),
+            defence=params.get("defence", {}),
+            home_advantage=params.get("home_advantage", 0.0),
+            rho=params.get("rho", 0.0),
+            converged=bool(metrics.get("converged", True)),
+            log_likelihood=metrics.get("log_likelihood", 0.0),
+            aic=metrics.get("aic", 0.0),
+            n_matches=metrics.get("n_matches", 0),
+            n_params=metrics.get("n_params", 0),
+        )
+
 
 def dc_tau(home_goals: int, away_goals: int, lambda_home: float, lambda_away: float, rho: float) -> float:
     """Dixon-Coles low-score correction — applies only to the four scorelines

@@ -86,20 +86,7 @@ class ForecastResult:
 
 
 def _fit_from_model_version(mv: ModelVersion) -> GoalModelFit:
-    params = mv.parameters or {}
-    metrics = mv.evaluation_metrics or {}
-    return GoalModelFit(
-        team_ids=params.get("team_ids", []),
-        attack=params.get("attack", {}),
-        defence=params.get("defence", {}),
-        home_advantage=params.get("home_advantage", 0.0),
-        rho=params.get("rho", 0.0),
-        converged=bool(metrics.get("converged", True)),
-        log_likelihood=metrics.get("log_likelihood", 0.0),
-        aic=metrics.get("aic", 0.0),
-        n_matches=metrics.get("n_matches", 0),
-        n_params=metrics.get("n_params", 0),
-    )
+    return GoalModelFit.from_persisted_parameters(mv.parameters or {}, mv.evaluation_metrics or {})
 
 
 class ForecastService:

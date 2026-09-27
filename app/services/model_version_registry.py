@@ -55,6 +55,85 @@ def record_disabled(db: Session, model_name: str, competition: Competition, reas
     db.commit()
 
 
+def stage_challenger(
+    db: Session,
+    settings: Settings,
+    model_name: str,
+    competition: Competition,
+    fit: GoalModelFit,
+    window_start: dt.datetime | None,
+    window_end: dt.datetime | None,
+    use_dc_adjustment: bool,
+) -> str:
+    """Persists a new fit as CHALLENGER without touching the current
+    ENABLED version — `ChampionChallengerService` decides separately
+    whether to `promote` or `reject_challenger` it. Any previous,
+    never-promoted CHALLENGER for this model/competition is retired first
+    (superseded by this newer fit), never deleted."""
+    previous_challengers = (
+        db.query(ModelVersion)
+        .filter_by(model_name=model_name, competition_id=competition.id, status=ModelStatus.CHALLENGER)
+        .all()
+    )
+    for m in previous_challengers:
+        m.status = ModelStatus.RETIRED
+        m.disabled_reason = "superseded by a newer challenger fit"
+
+    version = uuid.uuid4().hex[:12]
+    db.add(
+        ModelVersion(
+            model_name=model_name,
+            version=version,
+            status=ModelStatus.CHALLENGER,
+            competition_id=competition.id,
+            trained_at=dt.datetime.now(dt.timezone.utc),
+            training_window_start=window_start,
+            training_window_end=window_end,
+            hyperparameters={
+                "l2_regularization": settings.model_l2_regularization,
+                "use_dc_adjustment": use_dc_adjustment,
+            },
+            parameters={
+                "attack": fit.attack,
+                "defence": fit.defence,
+                "home_advantage": fit.home_advantage,
+                "rho": fit.rho,
+                "team_ids": fit.team_ids,
+            },
+            evaluation_metrics={
+                "log_likelihood": fit.log_likelihood,
+                "aic": fit.aic,
+                "n_matches": fit.n_matches,
+                "n_params": fit.n_params,
+                "converged": fit.converged,
+            },
+            is_reproducible=True,
+        )
+    )
+    db.commit()
+    return version
+
+
+def promote(db: Session, model_name: str, competition: Competition, version: str) -> None:
+    """Retires whatever is currently ENABLED (if anything) and promotes
+    `version` to ENABLED — the only way a model becomes, or stops being,
+    live. Used both for a challenger that won its evaluation and for an
+    administrator-triggered rollback to a previously-RETIRED version."""
+    retire_active(db, model_name, competition)
+    mv = db.query(ModelVersion).filter_by(model_name=model_name, competition_id=competition.id, version=version).one()
+    mv.status = ModelStatus.ENABLED
+    db.commit()
+
+
+def reject_challenger(db: Session, model_name: str, competition: Competition, version: str, reason: str) -> None:
+    """Retires a challenger that lost its evaluation against the champion —
+    kept, not deleted, so the decision remains inspectable via `/models`."""
+    mv = db.query(ModelVersion).filter_by(model_name=model_name, competition_id=competition.id, version=version).one()
+    mv.status = ModelStatus.RETIRED
+    mv.disabled_reason = reason
+    db.commit()
+
+
 def persist_goal_fit(
     db: Session,
     settings: Settings,
