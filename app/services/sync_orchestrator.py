@@ -21,6 +21,7 @@ from app.database.models.competitions import Competition, Season
 from app.database.models.enums import DataQualityStatus, SeasonStatus
 from app.database.models.monitoring import SystemEvent
 from app.logging_config import get_logger
+from app.database.models.modeling import ModelVersion
 from app.services.backtesting import BacktestingService
 from app.services.calibration import CalibrationTrainingReport, CalibrationService
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
@@ -36,6 +37,19 @@ from app.services.xg_model import XGModelService
 
 logger = get_logger(__name__)
 
+# Every model type the pipeline can train, in the order section 63's report
+# should mention them — used to compile "models activated/disabled" without
+# each training service needing to know about the report format.
+ALL_MODEL_NAMES = [
+    "dixon_coles",
+    "poisson_baseline",
+    "hierarchical_model",
+    "first_half_model",
+    "corners_model",
+    "cards_model",
+    "xg_model",
+]
+
 
 @dataclass
 class FullSyncReport:
@@ -44,6 +58,7 @@ class FullSyncReport:
     finished_at: dt.datetime | None = None
     discovery: CompetitionDiscoveryReport | None = None
     new_teams: int = 0
+    updated_teams: int = 0
     renamed_teams: int = 0
     new_fixtures: int = 0
     updated_fixtures: int = 0
@@ -53,7 +68,20 @@ class FullSyncReport:
     model_training: dict[str, ModelTrainingReport] = field(default_factory=dict)
     ensemble_training: dict[str, EnsembleTrainingReport] = field(default_factory=dict)
     calibration_training: dict[str, CalibrationTrainingReport] = field(default_factory=dict)
-    errors: list[str] = field(default_factory=list)
+    models_activated: list[str] = field(default_factory=list)
+    models_disabled: list[str] = field(default_factory=list)
+    models_requiring_review: list[str] = field(default_factory=list)
+    provider_errors: list[str] = field(default_factory=list)
+    validation_errors: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)  # provider_errors + validation_errors + anything uncategorized
+
+    @property
+    def system_status(self) -> str:
+        if self.discovery is None or (self.discovery.competitions_discovered == 0 and self.discovery.errors):
+            return "ERROR"
+        if self.provider_errors or self.validation_errors or self.models_requiring_review:
+            return "DEGRADED"
+        return "OK"
 
 
 class FullSyncService:
@@ -72,7 +100,7 @@ class FullSyncService:
         report = FullSyncReport(provider=self.provider.name, started_at=dt.datetime.now(dt.timezone.utc))
 
         report.discovery = CompetitionDiscoveryService(self.db, self.provider).run()
-        report.errors.extend(report.discovery.errors)
+        report.provider_errors.extend(report.discovery.errors)
 
         competitions = self.db.query(Competition).all()
 
@@ -81,19 +109,20 @@ class FullSyncService:
                 self._sync_competition(competition, report)
             except Exception as exc:  # keep one competition's failure from aborting the whole run
                 msg = f"{competition.canonical_competition_id}: {exc}"
-                report.errors.append(msg)
+                report.provider_errors.append(msg)
                 logger.error("full_sync_competition_failed", competition=competition.canonical_competition_id, error=str(exc))
 
         report.movements = MovementDetectionService(self.db).detect(competitions)
+        report.errors = [*report.provider_errors, *report.validation_errors]
 
         report.finished_at = dt.datetime.now(dt.timezone.utc)
         self.db.add(
             SystemEvent(
                 event_type="FULL_SYNC_COMPLETED",
-                severity="INFO",
+                severity="INFO" if report.system_status == "OK" else ("WARNING" if report.system_status == "DEGRADED" else "ERROR"),
                 message=(
                     f"competitions={len(competitions)} new_fixtures={report.new_fixtures} "
-                    f"new_results={report.new_results} errors={len(report.errors)}"
+                    f"new_results={report.new_results} status={report.system_status} errors={len(report.errors)}"
                 ),
                 context={"provider": self.provider.name},
             )
@@ -118,14 +147,18 @@ class FullSyncService:
                 competition.source_record_id, season.canonical_season_id
             )
             report.new_teams += len(team_report.new_teams)
+            report.updated_teams += len(team_report.updated_teams)
             report.renamed_teams += len(team_report.renamed_teams)
-            report.errors.extend(team_report.errors)
+            report.provider_errors.extend(team_report.errors)
 
             fixture_report = FixtureSyncService(self.db, self.provider).sync(competition, season)
             report.new_fixtures += len(fixture_report.new_fixtures)
             report.updated_fixtures += len(fixture_report.updated_fixtures)
             report.new_results += len(fixture_report.new_results)
-            report.errors.extend(fixture_report.errors)
+            report.provider_errors.extend(fixture_report.errors)
+            report.validation_errors.extend(
+                f"{competition.canonical_competition_id}:{season.canonical_season_id}: {r}" for r in fixture_report.rejected
+            )
 
             quality = DataQualityService(self.db).evaluate(competition, season, extra_issues=fixture_report.rejected)
             report.data_quality_summary[f"{competition.canonical_competition_id}:{season.canonical_season_id}"] = (
@@ -157,3 +190,35 @@ class FullSyncService:
         report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(
             competition, backtest_reports
         )
+
+        self._record_model_activation(competition, report)
+
+    def _record_model_activation(self, competition: Competition, report: FullSyncReport) -> None:
+        """Compiles the "models activated/disabled/requiring review" lines of
+        the section-63 report from whatever ModelVersion rows the training
+        steps above just left behind — a model is flagged for review when
+        it's live (ENABLED) but its own fit reported that it never converged,
+        which the quality gate would otherwise catch silently per-forecast."""
+        versions = (
+            self.db.query(ModelVersion)
+            .filter(ModelVersion.competition_id == competition.id, ModelVersion.model_name.in_(ALL_MODEL_NAMES))
+            .all()
+        )
+        latest_by_name: dict[str, ModelVersion] = {}
+        for v in versions:
+            if v.status.value not in ("ENABLED", "DISABLED"):
+                continue
+            current = latest_by_name.get(v.model_name)
+            if current is None or (v.trained_at or dt.datetime.min.replace(tzinfo=dt.timezone.utc)) > (
+                current.trained_at or dt.datetime.min.replace(tzinfo=dt.timezone.utc)
+            ):
+                latest_by_name[v.model_name] = v
+
+        for model_name, version in latest_by_name.items():
+            label = f"{competition.canonical_competition_id}:{model_name}"
+            if version.status.value == "ENABLED":
+                report.models_activated.append(label)
+                if not (version.evaluation_metrics or {}).get("converged", True):
+                    report.models_requiring_review.append(f"{label} (optimizer did not converge)")
+            else:
+                report.models_disabled.append(f"{label} ({version.disabled_reason})")

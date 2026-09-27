@@ -1,9 +1,10 @@
 """FastAPI application — MASTER BUILD PROMPT section 56.
 
-Phase 1-4 scope: competition/season/team/fixture read endpoints, data
-quality, league parameters, team strength, model versions, forecast
-generation (score matrix + everything derived from it), and a full-sync
-trigger. Calibration/ensemble endpoints are added as those phases land.
+Competition/season/team/fixture read endpoints, data quality, league
+parameters, team strength, model versions/performance/backtests/
+calibration, forecast generation (score matrix + everything derived from
+it), and a full-sync trigger — plus, when `settings.scheduler_enabled` is
+set, an automatic background full-sync on a fixed interval (section 13/64).
 
 NOTE: authentication/authorization (section 54) is not wired up yet — that
 is Phase 10. Do not expose this app on an untrusted network as-is; `/sync`
@@ -11,6 +12,8 @@ and `/forecast` in particular trigger writes to the database (and, for
 `/sync` with a live provider, outbound API calls).
 """
 from __future__ import annotations
+
+from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -59,7 +62,24 @@ from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
 from app.services.forecast_service import ForecastService
+from app.services.scheduler import JOB_ID, create_scheduler
 from app.services.sync_orchestrator import FullSyncService
+
+_scheduler = None  # set by lifespan when settings.scheduler_enabled; read by /system-health
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _scheduler
+    settings = get_settings()
+    if settings.scheduler_enabled:
+        _scheduler = create_scheduler(settings)
+        _scheduler.start()
+    yield
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
+
 
 app = FastAPI(
     title="Noeo Sports — Football Prediction Platform",
@@ -68,6 +88,7 @@ app = FastAPI(
         "Forecasts are probability distributions, never guarantees."
     ),
     version=APP_VERSION,
+    lifespan=lifespan,
 )
 
 
@@ -78,12 +99,18 @@ def system_health(db: Session = Depends(get_db)) -> SystemHealthOut:
     active = (
         db.query(func.count(Competition.id)).filter(Competition.status == CompetitionStatus.ACTIVE).scalar() or 0
     )
+    next_sync = None
+    if _scheduler is not None:
+        job = _scheduler.get_job(JOB_ID)
+        next_sync = job.next_run_time if job else None
     return SystemHealthOut(
         status="OK",
         data_provider=settings.data_provider,
         competitions_total=total,
         active_competitions=active,
         database_url_scheme=settings.database_url.split(":")[0],
+        scheduler_enabled=settings.scheduler_enabled,
+        next_scheduled_sync=next_sync,
     )
 
 
@@ -602,11 +629,13 @@ def get_prediction_distribution(canonical_fixture_id: str, db: Session = Depends
 
 @app.post("/sync", response_model=SyncReportOut)
 def sync(db: Session = Depends(get_db)) -> SyncReportOut:
-    """Runs the full pipeline (section 51, steps 1-11): discovery, team
-    mapping, fixture/result sync, promotion/relegation detection, data
-    quality scoring, league baselines, model eligibility and Dixon-Coles/
-    Poisson/team-strength training. Calibration and forecast generation
-    (steps 12+) land in Phase 4+."""
+    """Runs the full pipeline (section 51): discovery, team mapping,
+    fixture/result sync, promotion/relegation detection, data quality
+    scoring, league baselines, model eligibility, Dixon-Coles/Poisson/
+    hierarchical/first-half/corners/cards/xG training, walk-forward
+    backtesting, ensemble weighting and calibration — then returns the
+    section-63 synchronization report as structured data (see also
+    `render_sync_report` for the human-readable text version)."""
     settings = get_settings()
     provider = get_provider(settings)
     try:
@@ -621,11 +650,18 @@ def sync(db: Session = Depends(get_db)) -> SyncReportOut:
         finished_at=report.finished_at,
         discovery=DiscoveryReportOut.model_validate(report.discovery) if report.discovery else None,
         new_teams=report.new_teams,
+        updated_teams=report.updated_teams,
         renamed_teams=report.renamed_teams,
         new_fixtures=report.new_fixtures,
         updated_fixtures=report.updated_fixtures,
         new_results=report.new_results,
         data_quality_summary=report.data_quality_summary,
         movements=MovementReportOut.model_validate(report.movements) if report.movements else None,
+        models_activated=report.models_activated,
+        models_disabled=report.models_disabled,
+        models_requiring_review=report.models_requiring_review,
+        provider_errors=report.provider_errors,
+        validation_errors=report.validation_errors,
+        system_status=report.system_status,
         errors=report.errors,
     )

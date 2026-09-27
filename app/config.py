@@ -93,6 +93,12 @@ class Settings(BaseSettings):
     calibration_method: str = "isotonic"
     calibration_min_validation_matches: int = 20
 
+    # Automatic full-sync scheduling (sections 13, 51, 64). Off by default —
+    # starting the API must never silently begin making outbound provider
+    # calls and writing to the database unless an operator opts in.
+    scheduler_enabled: bool = False
+    full_sync_interval_hours: int = 6
+
 
 @lru_cache
 def get_settings() -> Settings:

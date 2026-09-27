@@ -57,17 +57,28 @@ class MovementReportOut(BaseModel):
 
 
 class SyncReportOut(BaseModel):
+    """MASTER BUILD PROMPT section 63's synchronization report, as structured
+    data; `GET /sync` (or the CLI's `render_sync_report`) renders the same
+    fields as the section-63 text template."""
+
     provider: str
     started_at: dt.datetime
     finished_at: dt.datetime | None
     discovery: DiscoveryReportOut | None
     new_teams: int
+    updated_teams: int
     renamed_teams: int
     new_fixtures: int
     updated_fixtures: int
     new_results: int
     data_quality_summary: dict[str, str]
     movements: MovementReportOut | None
+    models_activated: list[str]
+    models_disabled: list[str]
+    models_requiring_review: list[str]
+    provider_errors: list[str]
+    validation_errors: list[str]
+    system_status: str
     errors: list[str]
 
 
@@ -77,6 +88,8 @@ class SystemHealthOut(BaseModel):
     competitions_total: int
     active_competitions: int
     database_url_scheme: str
+    scheduler_enabled: bool
+    next_scheduled_sync: dt.datetime | None = None
 
 
 class TeamOut(BaseModel):

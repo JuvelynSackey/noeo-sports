@@ -25,13 +25,13 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 5 — xG, hierarchical shrinkage, and the first-half/corners/cards models.**
 - **Phase 6 — Ensemble weighting, calibration, and uncertainty.**
 - **Phase 7 — Walk-forward backtesting and model evaluation.**
+- **Phase 8 — Automatic synchronization report + scheduling.**
 
-Everything else in the roadmap (automatic full-sync reporting polish,
-drift/OOD monitoring, auth, the full admin dashboard, champion/challenger
-deployment) is **not yet implemented**. The schema for most of it already
-exists (see `app/database/models/`) so later phases can build on stable
-tables without re-migrating, but the business logic behind those tables is
-still to come.
+Everything else in the roadmap (drift/OOD monitoring, auth, the full admin
+dashboard, champion/challenger deployment) is **not yet implemented**. The
+schema for most of it already exists (see `app/database/models/`) so later
+phases can build on stable tables without re-migrating, but the business
+logic behind those tables is still to come.
 
 ## Quickstart
 
@@ -65,6 +65,10 @@ uvicorn app.api.main:app --reload
 
 python scripts/generate_forecasts.py --competition mock:MOCK-D1 --limit 5
 ```
+
+Set `SCHEDULER_ENABLED=true` in `.env` to have the API process run the full
+pipeline automatically every `FULL_SYNC_INTERVAL_HOURS` in the background,
+in addition to (not instead of) `POST /sync` on demand.
 
 Run tests:
 
@@ -109,7 +113,8 @@ changes.
 app/
   api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
                   models, model-performance, backtests, calibration,
-                  league-parameters, team-strength, forecast/predictions, sync)
+                  league-parameters, team-strength, forecast/predictions, sync);
+                  its lifespan starts the background scheduler when enabled
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -150,6 +155,8 @@ app/
     calibration.py               isotonic/Platt/beta calibration of P(home win) (section 37)
     forecast_service.py         quality gate -> ensemble score matrix -> prediction registry (section 61)
     sync_orchestrator.py        wires all of the above into one full-sync run
+    sync_report.py               renders the section-63 synchronization report from a FullSyncReport
+    scheduler.py                 optional background full-sync on a fixed interval (section 13/64)
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
 
@@ -159,8 +166,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   movement detection, data quality, goal-model MLE, model training,
                   hierarchical shrinkage, market models, xG model, league
                   parameters, score matrix, evaluation metrics, walk-forward
-                  backtesting, ensemble, calibration, forecast service,
-                  full-sync orchestration, DB constraints)
+                  backtesting, ensemble, calibration, sync report, scheduler,
+                  forecast service, full-sync orchestration, DB constraints)
 ```
 
 ### Database
@@ -426,6 +433,34 @@ extending walk-forward backtesting to corners/cards/first-half/xG is a
 natural, low-risk follow-up rather than something this phase needed to do
 to satisfy sections 34-37.
 
+### Synchronization report and scheduling (Phase 8)
+
+1. **The section-63 synchronization report** (`sync_report.py`) — every
+   `FullSyncReport` now tracks, and `render_sync_report()` renders in the
+   spec's exact template: new/updated competitions/seasons/teams/fixtures/
+   results, the data-quality summary, which models were **activated**,
+   **disabled** (with each one's reason), or flagged **requiring review**
+   (an ENABLED model whose own fit reported `converged=False` — live and
+   usable per the quality gate's check, but worth a human look), separate
+   **provider errors** (the discovery/team/fixture sync calls that failed)
+   from **validation errors** (data the provider *did* return but that got
+   rejected as implausible), and an overall **system status**
+   (`OK`/`DEGRADED`/`ERROR`, derived from those, never hand-set). Every
+   number is read off the report object — nothing is a hard-coded example.
+   `scripts/sync_all.py` prints it; `POST /sync` returns the same fields as
+   JSON via `SyncReportOut`.
+2. **Optional automatic scheduling** (`scheduler.py`, sections 13/64) — off
+   by default (`settings.scheduler_enabled`), since starting the API must
+   never silently begin making outbound provider calls and writing to the
+   database. When enabled, an APScheduler background job runs the same
+   `FullSyncService` pipeline every `full_sync_interval_hours`, wired into
+   the FastAPI app's lifespan (started on startup, shut down on shutdown).
+   `GET /system-health` reports whether it's enabled and, if so, the next
+   scheduled run time. This is one combined job on one interval, not yet
+   the independently-scheduled discovery/fixture/validation/monitoring
+   cadences section 13 illustrates — a natural follow-up once the pipeline
+   itself is split into independently-runnable stages.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -435,7 +470,7 @@ to satisfy sections 34-37.
 5. **xG + hierarchical + additional models (corners, cards, first-half)** — done
 6. **Ensemble + calibration + uncertainty** — done
 7. **Walk-forward backtesting + model evaluation** — done
-8. Automatic league/season synchronization (fixtures, results, full sync report)
+8. **Automatic league/season synchronization (fixtures, results, full sync report)** — done
 9. Monitoring + drift detection + OOD detection
 10. Administrator dashboard + authentication/RBAC
 11. Champion/challenger deployment + rollback
