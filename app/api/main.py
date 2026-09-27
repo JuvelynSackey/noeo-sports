@@ -19,6 +19,8 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import (
     AdministratorNotesOut,
+    CalibrationDiagnosticOut,
+    CalibrationOut,
     CompetitionDetailOut,
     CompetitionOut,
     DataQualityOut,
@@ -31,6 +33,7 @@ from app.api.schemas import (
     MatchForecastOut,
     ModelDiagnosticsOut,
     ModelInformationOut,
+    ModelPerformanceOut,
     ModelVersionDetailOut,
     ModelVersionSummaryOut,
     MovementReportOut,
@@ -49,7 +52,7 @@ from app.database.models.competitions import Competition, Season
 from app.database.models.enums import CompetitionStatus
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
-from app.database.models.modeling import ModelVersion
+from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
 from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
@@ -305,6 +308,76 @@ def get_model(version: str, db: Session = Depends(get_db)) -> ModelVersionDetail
     )
 
 
+@app.get("/model-performance", response_model=list[ModelPerformanceOut])
+def model_performance(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    db: Session = Depends(get_db),
+) -> list[ModelPerformanceOut]:
+    """Held-out validation performance from ensemble weight learning
+    (sections 34/36) — not yet the full walk-forward evaluation of Phase 7."""
+    query = (
+        db.query(CalibrationResult, ModelVersion, Competition.canonical_competition_id)
+        .join(ModelVersion, CalibrationResult.model_version_id == ModelVersion.id)
+        .join(Competition, CalibrationResult.competition_id == Competition.id)
+        .filter(CalibrationResult.forecast_type == "ensemble_validation")
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+
+    out = []
+    for record, mv, comp_canonical in query.all():
+        weight_row = db.query(ModelWeight).filter_by(model_version_id=mv.id, competition_id=mv.competition_id).first()
+        out.append(
+            ModelPerformanceOut(
+                competition_canonical_id=comp_canonical,
+                model_name=mv.model_name,
+                model_version=mv.version,
+                ensemble_weight=weight_row.weight if weight_row else None,
+                brier_score=record.brier_score,
+                log_loss=record.log_loss,
+                ranked_probability_score=record.ranked_probability_score,
+                evaluated_at=record.evaluated_at,
+            )
+        )
+    return out
+
+
+@app.get("/calibration", response_model=list[CalibrationOut])
+def calibration(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    db: Session = Depends(get_db),
+) -> list[CalibrationOut]:
+    """Probability-calibration diagnostics (section 37) — Brier score, log
+    loss, RPS, expected calibration error and a reliability curve, measured
+    on the same holdout split as ensemble weight learning."""
+    query = (
+        db.query(CalibrationResult, ModelVersion, Competition.canonical_competition_id)
+        .join(ModelVersion, CalibrationResult.model_version_id == ModelVersion.id)
+        .join(Competition, CalibrationResult.competition_id == Competition.id)
+        .filter(CalibrationResult.forecast_type == "outcome_probabilities")
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+
+    out = []
+    for record, mv, comp_canonical in query.all():
+        out.append(
+            CalibrationOut(
+                competition_canonical_id=comp_canonical,
+                model_name=mv.model_name,
+                model_version=mv.version,
+                method=record.method,
+                brier_score=record.brier_score,
+                log_loss=record.log_loss,
+                ranked_probability_score=record.ranked_probability_score,
+                calibration_error=record.calibration_error,
+                reliability_curve=(record.reliability_curve or {}).get("points"),
+                evaluated_at=record.evaluated_at,
+            )
+        )
+    return out
+
+
 def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecastOut:
     fixture = db.get(Fixture, prediction.fixture_id)
     competition = db.get(Competition, fixture.competition_id)
@@ -337,21 +410,14 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
     outcome_out = OutcomeDistributionOut(**outcome) if outcome else None
 
     model_version = db.get(ModelVersion, prediction.model_version_id) if prediction.model_version_id else None
-    supporting = []
-    if model_version is not None:
-        sibling = (
-            db.query(ModelVersion)
-            .filter(
-                ModelVersion.competition_id == model_version.competition_id,
-                ModelVersion.model_name != model_version.model_name,
-                ModelVersion.status == "ENABLED",
-            )
-            .first()
-        )
-        if sibling is not None:
-            supporting.append(sibling.model_name)
-
     validation = prediction.validation_report or {}
+    ensemble_weights = validation.get("ensemble_weights") or {}
+    champion_name = model_version.model_name if model_version else None
+    supporting = [name for name in ensemble_weights if name != champion_name]
+
+    calibration_diag = validation.get("calibration")
+    calibration_out = CalibrationDiagnosticOut(**calibration_diag) if calibration_diag else None
+
     supplementary = prediction.supplementary_markets or {}
 
     first_half_out = None
@@ -400,8 +466,9 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
             ood_status=prediction.ood_status,
         ),
         model_information=ModelInformationOut(
-            champion_model=model_version.model_name if model_version else None,
+            champion_model=champion_name,
             supporting_models=supporting,
+            ensemble_weights=ensemble_weights,
             model_version=model_version.version if model_version else None,
             dataset_version=prediction.dataset_version,
             feature_version=prediction.feature_version,
@@ -411,6 +478,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
         administrator_notes=AdministratorNotesOut(
             warnings=validation.get("warnings", []),
             errors=validation.get("errors", []),
+            calibration=calibration_out,
         ),
     )
 

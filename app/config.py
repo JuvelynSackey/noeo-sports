@@ -77,6 +77,17 @@ class Settings(BaseSettings):
     xg_model_min_matches: int = 10
     first_half_model_min_matches: int = 10
 
+    # Ensemble weight learning (section 34) — a chronological holdout split
+    # (not yet the full walk-forward evaluation of Phase 7) used only to
+    # estimate each candidate model's relative out-of-sample skill.
+    ensemble_validation_fraction: float = 0.2
+    ensemble_min_train_matches: int = 10
+    ensemble_min_validation_matches: int = 5
+
+    # Calibration (section 37). "isotonic" | "platt" | "beta".
+    calibration_method: str = "isotonic"
+    calibration_min_validation_matches: int = 20
+
 
 @lru_cache
 def get_settings() -> Settings:

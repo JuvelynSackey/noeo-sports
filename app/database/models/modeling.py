@@ -66,4 +66,7 @@ class CalibrationResult(Base, TimestampMixin):
     ranked_probability_score: Mapped[float | None] = mapped_column(Float)
     calibration_error: Mapped[float | None] = mapped_column(Float)
     reliability_curve: Mapped[dict | None] = mapped_column(JSON)
+    # The fitted transform itself (isotonic breakpoints, Platt/beta coefficients),
+    # so it can be reapplied to future forecasts rather than only measured.
+    calibration_map: Mapped[dict | None] = mapped_column(JSON)
     evaluated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

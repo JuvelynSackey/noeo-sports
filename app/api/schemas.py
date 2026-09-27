@@ -181,6 +181,37 @@ class ModelVersionDetailOut(ModelVersionSummaryOut):
     parameters: dict | None
 
 
+class ModelPerformanceOut(BaseModel):
+    """Held-out validation performance from ensemble weight learning
+    (section 34/36) — not yet the full walk-forward evaluation of Phase 7."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    model_name: str
+    model_version: str
+    ensemble_weight: float | None
+    brier_score: float | None
+    log_loss: float | None
+    ranked_probability_score: float | None
+    evaluated_at: dt.datetime
+
+
+class CalibrationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    model_name: str
+    model_version: str
+    method: str
+    brier_score: float | None
+    log_loss: float | None
+    ranked_probability_score: float | None
+    calibration_error: float | None
+    reliability_curve: list[dict] | None
+    evaluated_at: dt.datetime
+
+
 class ScorelineOut(BaseModel):
     home_goals: int
     away_goals: int
@@ -223,6 +254,7 @@ class ModelDiagnosticsOut(BaseModel):
 class ModelInformationOut(BaseModel):
     champion_model: str | None
     supporting_models: list[str]
+    ensemble_weights: dict[str, float]
     model_version: str | None
     dataset_version: str | None
     feature_version: str
@@ -230,9 +262,19 @@ class ModelInformationOut(BaseModel):
     predicted_at: dt.datetime
 
 
+class CalibrationDiagnosticOut(BaseModel):
+    method: str
+    raw_home_win_probability: float
+    calibrated_home_win_probability: float
+    calibration_error: float | None
+    brier_score: float | None
+    log_loss: float | None
+
+
 class AdministratorNotesOut(BaseModel):
     warnings: list[str]
     errors: list[str]
+    calibration: CalibrationDiagnosticOut | None = None
 
 
 class FirstHalfForecastOut(BaseModel):

@@ -96,9 +96,17 @@ def _print_forecast(db, fixture: Fixture, result) -> None:
     print("MODEL INFORMATION")
     print(f"Champion Model: {result.champion_model}")
     print(f"Supporting Models: {result.supporting_models}")
+    print("Ensemble Weights: " + ", ".join(f"{name}={w:.1%}" for name, w in result.ensemble_weights.items()))
     print(f"Model Version: {result.model_version}")
     print(f"Dataset Version: {result.dataset_version}")
     print(f"Prediction Timestamp: {result.predicted_at}")
+    if result.calibration:
+        c = result.calibration
+        print()
+        print("CALIBRATION")
+        print(f"Method: {c['method']}")
+        print(f"Raw Home-Win Probability: {c['raw_home_win_probability']:.1%}")
+        print(f"Calibrated Home-Win Probability: {c['calibrated_home_win_probability']:.1%}")
     if result.warnings:
         print()
         print("ADMINISTRATOR NOTES")

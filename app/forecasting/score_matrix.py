@@ -64,6 +64,17 @@ def most_probable_scorelines(matrix: np.ndarray, top_n: int = 5) -> list[dict]:
     ]
 
 
+def expected_goals_from_matrix(matrix: np.ndarray) -> tuple[float, float]:
+    """Expected home/away goals under the matrix actually being published —
+    used for the ensemble's blended matrix, where no single model's raw
+    lambda is "the" expectation anymore."""
+    max_goals = matrix.shape[0] - 1
+    goals = np.arange(max_goals + 1)
+    expected_home = float((matrix.sum(axis=1) * goals).sum())
+    expected_away = float((matrix.sum(axis=0) * goals).sum())
+    return expected_home, expected_away
+
+
 def outcome_probabilities(matrix: np.ndarray) -> dict[str, float]:
     home_win = float(np.sum(np.tril(matrix, k=-1)))
     draw = float(np.sum(np.diag(matrix)))

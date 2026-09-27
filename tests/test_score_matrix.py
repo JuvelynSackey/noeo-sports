@@ -5,6 +5,7 @@ from app.forecasting.score_matrix import (
     build_score_matrix,
     btts_and_clean_sheets,
     check_consistency,
+    expected_goals_from_matrix,
     goal_distribution,
     most_probable_scorelines,
     outcome_probabilities,
@@ -125,6 +126,17 @@ def test_consistency_check_flags_broken_outcome_probabilities():
     report = check_consistency(matrix, outcomes, ou)
     assert not report.consistent
     assert any("sum to 1" in v for v in report.violations)
+
+
+def test_expected_goals_from_matrix_matches_model_lambda():
+    model = GoalModel(use_dc_adjustment=False)  # rho=0 so DC skew doesn't shift the mean
+    fit = _fit(attack_home=0.2, attack_away=-0.1, home_advantage=0.3, rho=0.0)
+    result = build_score_matrix(model, fit, "HOME", "AWAY", initial_max_goals=15)
+
+    lam_h, lam_a = model.expected_goals(fit, "HOME", "AWAY")
+    home, away = expected_goals_from_matrix(result.matrix)
+    assert home == pytest.approx(lam_h, abs=0.02)
+    assert away == pytest.approx(lam_a, abs=0.02)
 
 
 def test_consistency_check_flags_non_monotonic_over_under():

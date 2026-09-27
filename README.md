@@ -23,12 +23,13 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 3 — Dixon-Coles + Poisson + dynamic team-strength models.**
 - **Phase 4 — Score matrix + probabilistic forecasting.**
 - **Phase 5 — xG, hierarchical shrinkage, and the first-half/corners/cards models.**
+- **Phase 6 — Ensemble weighting, calibration, and uncertainty.**
 
-Everything else in the roadmap (forecasting models, ensembling, calibration,
-drift monitoring, auth, full dashboard) is **not yet implemented**. The
-schema for most of it already exists (see `app/database/models/`) so later
-phases can build on stable tables without re-migrating, but the business
-logic behind those tables is still to come.
+Everything else in the roadmap (walk-forward backtesting, drift/OOD
+monitoring, auth, the full admin dashboard, champion/challenger deployment)
+is **not yet implemented**. The schema for most of it already exists (see
+`app/database/models/`) so later phases can build on stable tables without
+re-migrating, but the business logic behind those tables is still to come.
 
 ## Quickstart
 
@@ -51,6 +52,8 @@ uvicorn app.api.main:app --reload
 #       GET  http://127.0.0.1:8000/fixtures?competition=mock:MOCK-D1&season=2024
 #       GET  http://127.0.0.1:8000/data-quality
 #       GET  http://127.0.0.1:8000/models?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/model-performance?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/calibration?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/league-parameters?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/teams/mock:MT-01/strength
 #       POST http://127.0.0.1:8000/forecast?fixture=mock:MOCK-D1:2026:003
@@ -102,7 +105,8 @@ changes.
 ```
 app/
   api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
-                  models, league-parameters, team-strength, forecast/predictions, sync)
+                  models, model-performance, calibration, league-parameters,
+                  team-strength, forecast/predictions, sync)
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -114,6 +118,10 @@ app/
   forecasting/
     score_matrix.py             score matrix + every probability derived from it,
                                  plus the section-29 consistency checker
+  evaluation/
+    metrics.py                  log loss, Brier score, RPS, expected calibration
+                                 error, reliability curves (section 36) — shared by
+                                 ensemble weight learning and, later, Phase 7
   services/
     identifiers.py             canonical "<provider>:<native_id>" ID scheme
     enum_utils.py               defensive provider-string -> enum parsing
@@ -132,7 +140,9 @@ app/
     market_models.py            first-half/corners/cards models, reusing the goal-model engine
     xg_model.py                 xG-based expected goals (ratio model; DATA_UNAVAILABLE-aware)
     team_strength.py            per-team attack/defence/home/away/recent strength snapshots
-    forecast_service.py         quality gate -> score matrix -> prediction registry (section 61)
+    ensemble.py                  learns ModelWeight per competition from a holdout split (section 34)
+    calibration.py               isotonic/Platt/beta calibration of P(home win) (section 37)
+    forecast_service.py         quality gate -> ensemble score matrix -> prediction registry (section 61)
     sync_orchestrator.py        wires all of the above into one full-sync run
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
@@ -142,8 +152,8 @@ scripts/          CLI entry points (init_db, sync_competitions, sync_all, genera
 tests/            pytest suite (providers, discovery, team mapping, fixture sync,
                   movement detection, data quality, goal-model MLE, model training,
                   hierarchical shrinkage, market models, xG model, league
-                  parameters, score matrix, forecast service, full-sync
-                  orchestration, DB constraints)
+                  parameters, score matrix, evaluation metrics, ensemble,
+                  calibration, forecast service, full-sync orchestration, DB constraints)
 ```
 
 ### Database
@@ -251,9 +261,10 @@ into an actual forecast for one fixture, and registers it:
    Any failure sets `FORECAST STATUS = FAILED_VALIDATION` — never silently
    published as if it were a normal forecast.
 2. **Score matrix** (`app/forecasting/score_matrix.py`, section 25) — built
-   from the Dixon-Coles fit, auto-expanding the goal grid if the truncated
-   tail probability is still significant, then normalized to sum to
-   exactly 1.
+   from the ensemble blend (Phase 6) when learned weights exist, or the
+   Dixon-Coles fit alone otherwise, auto-expanding the goal grid if the
+   truncated tail probability is still significant, then normalized to sum
+   to exactly 1.
 3. **Everything derived from that one matrix** (sections 26-30): the top-N
    most-probable scorelines (never called "guaranteed"), outcome
    probabilities (home/draw/away), a goal distribution (0/1/2/3/4+, plus
@@ -262,14 +273,13 @@ into an actual forecast for one fixture, and registers it:
    verifies the matrix sums to 1, outcome probabilities sum to 1, and the
    over/under lines are monotonically decreasing — a failure here also
    forces `FAILED_VALIDATION` rather than publishing something incoherent.
-4. **First-pass uncertainty and disagreement** (sections 38-39) — aleatoric
-   uncertainty as `sqrt(expected_home_goals + expected_away_goals)` (a
-   Poisson-scale proxy for intrinsic match randomness), epistemic
-   uncertainty from the two teams' `TeamStrength.uncertainty`, and, when
-   the Poisson baseline is also enabled, a LOW/MEDIUM/HIGH disagreement
-   level from how far its outcome probabilities diverge from Dixon-Coles's.
-   A forecast with no supporting model to compare against is labelled
-   `LIMITED` rather than `ACTIVE` — full ensemble/calibration is Phase 6.
+4. **Uncertainty and disagreement** (sections 38-39) — aleatoric uncertainty
+   as `sqrt(expected_home_goals + expected_away_goals)` (a Poisson-scale
+   proxy for intrinsic match randomness), epistemic uncertainty from the
+   two teams' `TeamStrength.uncertainty`, and a LOW/MEDIUM/HIGH disagreement
+   level from the maximum pairwise gap between ensemble members' outcome
+   probabilities (Phase 6 — see below). A forecast with fewer than two
+   ensemble members contributing is labelled `LIMITED` rather than `ACTIVE`.
 5. **Prediction registry + pre-match snapshot** (sections 46-47) — every
    call to `POST /forecast` inserts a *new* `Prediction` row (never
    overwrites) with a fresh UUID, the model/dataset/feature/software
@@ -320,8 +330,10 @@ goals-based forecast:
    (true for both providers configured today). When xG does exist, this
    computes a simple attack-strength x defence-weakness ratio against the
    competition's own average xG per team — not the Poisson MLE used
-   elsewhere, since xG is continuous rather than count data. Combining it
-   with the goal-based distribution is ensemble work (Phase 6).
+   elsewhere, since xG is continuous rather than count data. It stays a
+   standalone comparison signal (via `/models`) rather than being blended
+   into the goal-based ensemble below, since averaging a continuous-xG
+   estimate with a discrete score-count distribution isn't yet principled.
 
 All four use the same eligibility engine and `ModelVersion` retire/persist
 machinery as Phase 3's models (`model_eligibility.py`'s `evaluate_market`,
@@ -331,6 +343,48 @@ disabled, with its reason — the same way regardless of which one produced it.
 automatically when their models are enabled for the competition, and simply
 omits them (with a note in `administrator_notes.warnings`) when they aren't.
 
+### Ensemble weighting, calibration and uncertainty (Phase 6)
+
+1. **Ensemble weight learning** (`ensemble.py`, section 34) — a chronological
+   holdout split of each competition's own completed matches (earliest
+   ~80% train, most recent ~20% validate — both fractions and minimum
+   sample sizes are configurable). `dixon_coles`, `poisson_baseline` and
+   `hierarchical_model` are each refit on the training portion only, scored
+   out-of-sample on the validation portion via mean log loss, and turned
+   into weights with a softmax (lower held-out loss -> higher weight) —
+   never assigned by hand. Weights are stored as `ModelWeight` rows and
+   each candidate's held-out Brier/log-loss/RPS is stored as a
+   `CalibrationResult` (`forecast_type="ensemble_validation"`), readable via
+   `GET /model-performance`. Too little data for a trustworthy split (below
+   `ensemble_min_train_matches` + `ensemble_min_validation_matches`) skips
+   weighting entirely rather than fitting on scraps — `ForecastService`
+   then falls back to `dixon_coles` alone. This is a single-split holdout,
+   not yet the full rolling walk-forward evaluation of Phase 7.
+2. **Score matrix blending** (`forecast_service.py`) — every ENABLED member
+   with a learned weight gets its own normalized score matrix (rebuilt on a
+   common grid size so they can be combined), then they're linearly pooled
+   by their normalized weights into the one matrix the forecast actually
+   publishes. A member whose training data never saw one of the two teams
+   is excluded and the remaining weights renormalized.
+3. **Calibration** (`calibration.py`, section 37) — on the same holdout
+   split, fits a recalibration map for P(home win) using isotonic
+   regression, Platt scaling, or beta calibration (Kull et al. 2017;
+   `settings.calibration_method`), and measures Brier score, log loss, RPS,
+   expected calibration error and a reliability curve — all stored as a
+   `CalibrationResult` (`forecast_type="outcome_probabilities"`, readable
+   via `GET /calibration`). Skipped, passing raw probabilities through
+   unchanged, below `calibration_min_validation_matches` (default 20 — a
+   deliberately higher bar than ensemble weighting, since isotonic
+   regression on a handful of points is just overfitting). When calibration
+   *is* available, the calibrated home-win probability is surfaced
+   alongside the raw ensemble figure in `administrator_notes.calibration`
+   rather than silently overwriting `outcome_probabilities` — every
+   published probability stays traceable to the one score matrix (section 29).
+4. **Ensemble disagreement** (section 39) — `model_disagreement` is now the
+   maximum pairwise gap, across every ensemble member actually used, in any
+   of the three outcome probabilities (not just champion-vs-one-other as in
+   Phase 4), giving a real N-model disagreement signal as the ensemble grows.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -338,7 +392,7 @@ omits them (with a note in `administrator_notes.warnings`) when they aren't.
 3. **Dixon–Coles + Poisson + dynamic strength models** — done
 4. **Score matrix + probabilistic forecasting** — done
 5. **xG + hierarchical + additional models (corners, cards, first-half)** — done
-6. Ensemble + calibration + uncertainty
+6. **Ensemble + calibration + uncertainty** — done
 7. Walk-forward backtesting + model evaluation
 8. Automatic league/season synchronization (fixtures, results, full sync report)
 9. Monitoring + drift detection + OOD detection

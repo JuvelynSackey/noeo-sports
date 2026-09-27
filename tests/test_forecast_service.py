@@ -1,15 +1,21 @@
 import datetime as dt
 
+import pytest
+
+from app.config import Settings
 from app.data.providers.mock_provider import MockProvider
 from app.database.models.competitions import Competition, Season
 from app.database.models.enums import CompetitionFormat, DataQualityStatus, FixtureStatus, ForecastStatus, ModelStatus
 from app.database.models.fixtures import Fixture
-from app.database.models.modeling import ModelVersion
+from app.database.models.modeling import CalibrationResult, ModelVersion
 from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
+from app.services.ensemble import EnsembleService
 from app.services.forecast_service import ForecastService
+from app.services.model_training import ModelTrainingService
 from app.services.sync_orchestrator import FullSyncService
+from tests.test_ensemble import _seed_realistic_league
 
 
 def _competition(cid: str, **overrides) -> Competition:
@@ -74,6 +80,8 @@ def test_full_sync_then_forecast_is_active_and_consistent(db_session):
     assert len(result.most_probable_scorelines) == 5
     assert result.expected_goals_home > 0 and result.expected_goals_away > 0
     assert result.model_disagreement_level in {"LOW_DISAGREEMENT", "MEDIUM_DISAGREEMENT", "HIGH_DISAGREEMENT"}
+    assert set(result.ensemble_weights) == {"dixon_coles", "poisson_baseline", "hierarchical_model"}
+    assert sum(result.ensemble_weights.values()) - 1.0 < 1e-6
 
     stored = db_session.query(Prediction).filter_by(prediction_id=result.prediction_id).one()
     assert stored.forecast_status == ForecastStatus.ACTIVE
@@ -112,6 +120,79 @@ def test_missing_supplementary_markets_degrade_gracefully(db_session):
     assert any("first_half_model unavailable" in w for w in result.warnings)
     assert any("corners_model unavailable" in w for w in result.warnings)
     assert any("cards_model unavailable" in w for w in result.warnings)
+
+
+def test_ensemble_blend_differs_from_single_champion_matrix(db_session):
+    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
+    ModelTrainingService(db_session, settings).train(competition)
+    ensemble_report = EnsembleService(db_session, settings).train(competition)
+    assert ensemble_report.trained
+
+    season = db_session.query(Season).filter_by(competition_id=competition.id).one()
+    a = db_session.query(Team).filter_by(canonical_team_id="prov:T0").one()
+    b = db_session.query(Team).filter_by(canonical_team_id="prov:T5").one()
+    last_kickoff = max(f.kickoff_utc for f in db_session.query(Fixture).filter_by(competition_id=competition.id).all())
+    fixture = _fixture(competition, season, a, b, "FUTURE", kickoff=last_kickoff + dt.timedelta(days=30))
+    db_session.add(fixture)
+    db_session.commit()
+
+    result = ForecastService(db_session, settings).generate(fixture)
+
+    assert result.forecast_status == ForecastStatus.ACTIVE
+    assert len(result.ensemble_weights) == 3
+    assert sum(result.ensemble_weights.values()) == pytest.approx(1.0, abs=1e-6)
+    assert result.model_disagreement_level is not None
+
+    champion_mv = (
+        db_session.query(ModelVersion)
+        .filter_by(model_name="dixon_coles", competition_id=competition.id, status=ModelStatus.ENABLED)
+        .one()
+    )
+    from app.services.forecast_service import _fit_from_model_version
+    from app.forecasting.score_matrix import build_score_matrix, outcome_probabilities
+    from app.models.goal_model import GoalModel
+
+    champion_fit = _fit_from_model_version(champion_mv)
+    champion_score = build_score_matrix(GoalModel(use_dc_adjustment=True), champion_fit, "prov:T0", "prov:T5")
+    champion_only_outcomes = outcome_probabilities(champion_score.matrix)
+
+    # The blended ensemble result should not be bit-for-bit identical to using
+    # dixon_coles alone (unless all three members happened to agree perfectly).
+    assert result.outcome_probabilities != champion_only_outcomes
+
+
+def test_calibration_diagnostic_surfaced_when_available(db_session):
+    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
+    ModelTrainingService(db_session, settings).train(competition)
+
+    champion_mv = (
+        db_session.query(ModelVersion)
+        .filter_by(model_name="dixon_coles", competition_id=competition.id, status=ModelStatus.ENABLED)
+        .one()
+    )
+    db_session.add(CalibrationResult(
+        model_version_id=champion_mv.id, competition_id=competition.id, forecast_type="outcome_probabilities",
+        method="isotonic", brier_score=0.2, log_loss=0.6, ranked_probability_score=0.15, calibration_error=0.05,
+        calibration_map={"method": "isotonic", "x": [0.0, 0.5, 1.0], "y": [0.1, 0.5, 0.9]},
+    ))
+    db_session.commit()
+
+    season = db_session.query(Season).filter_by(competition_id=competition.id).one()
+    a = db_session.query(Team).filter_by(canonical_team_id="prov:T0").one()
+    b = db_session.query(Team).filter_by(canonical_team_id="prov:T5").one()
+    last_kickoff = max(f.kickoff_utc for f in db_session.query(Fixture).filter_by(competition_id=competition.id).all())
+    fixture = _fixture(competition, season, a, b, "CALTEST", kickoff=last_kickoff + dt.timedelta(days=30))
+    db_session.add(fixture)
+    db_session.commit()
+
+    result = ForecastService(db_session, settings).generate(fixture)
+
+    assert result.calibration is not None
+    assert result.calibration["method"] == "isotonic"
+    assert 0.0 <= result.calibration["calibrated_home_win_probability"] <= 1.0
+    assert result.calibration["raw_home_win_probability"] == result.outcome_probabilities["home_win"]
 
 
 def test_repeated_forecasts_never_overwrite_the_registry(db_session):

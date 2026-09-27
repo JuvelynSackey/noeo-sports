@@ -1,10 +1,12 @@
 """Full synchronization pipeline — MASTER BUILD PROMPT section 51 (steps
-1-11 of that list; ensemble/calibration land in Phase 6). Wires together:
-discover competitions/seasons -> map teams -> sync fixtures/results/
-statistics/xG -> detect promotion/relegation -> score data quality ->
-calculate league baselines -> evaluate model eligibility -> train Dixon-
-Coles/Poisson/hierarchical/team-strength models -> train the independent
-first-half/corners/cards/xG models (Phase 5).
+1-13 of that list; forecast generation itself, step 13, happens on demand
+via ForecastService/POST /forecast rather than for every fixture on every
+sync). Wires together: discover competitions/seasons -> map teams -> sync
+fixtures/results/statistics/xG -> detect promotion/relegation -> score data
+quality -> calculate league baselines -> evaluate model eligibility -> train
+Dixon-Coles/Poisson/hierarchical/team-strength models -> train the
+independent first-half/corners/cards/xG models (Phase 5) -> learn ensemble
+weights and fit calibration from a holdout split (Phase 6).
 """
 from __future__ import annotations
 
@@ -18,8 +20,10 @@ from app.database.models.competitions import Competition, Season
 from app.database.models.enums import DataQualityStatus, SeasonStatus
 from app.database.models.monitoring import SystemEvent
 from app.logging_config import get_logger
+from app.services.calibration import CalibrationTrainingReport, CalibrationService
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
 from app.services.data_quality import DataQualityService
+from app.services.ensemble import EnsembleService, EnsembleTrainingReport
 from app.services.fixture_sync import FixtureSyncService
 from app.services.league_parameters import LeagueParameterService
 from app.services.market_models import MarketModelTrainingService
@@ -45,6 +49,8 @@ class FullSyncReport:
     data_quality_summary: dict[str, str] = field(default_factory=dict)
     movements: MovementReport | None = None
     model_training: dict[str, ModelTrainingReport] = field(default_factory=dict)
+    ensemble_training: dict[str, EnsembleTrainingReport] = field(default_factory=dict)
+    calibration_training: dict[str, CalibrationTrainingReport] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
 
@@ -136,3 +142,9 @@ class FullSyncService:
         market_service.train_corners(competition)
         market_service.train_cards(competition)
         XGModelService(self.db).train(competition)
+
+        # Ensemble weights and calibration both need the production Dixon-Coles/
+        # Poisson/hierarchical ModelVersions above to already exist, since they
+        # attach their results to those rows.
+        report.ensemble_training[competition.canonical_competition_id] = EnsembleService(self.db).train(competition)
+        report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(competition)
