@@ -26,9 +26,10 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 6 — Ensemble weighting, calibration, and uncertainty.**
 - **Phase 7 — Walk-forward backtesting and model evaluation.**
 - **Phase 8 — Automatic synchronization report + scheduling.**
+- **Phase 9 — Model/data drift detection and out-of-distribution flagging.**
 
-Everything else in the roadmap (drift/OOD monitoring, auth, the full admin
-dashboard, champion/challenger deployment) is **not yet implemented**. The
+Everything else in the roadmap (auth, the full admin dashboard,
+champion/challenger deployment) is **not yet implemented**. The
 schema for most of it already exists (see `app/database/models/`) so later
 phases can build on stable tables without re-migrating, but the business
 logic behind those tables is still to come.
@@ -113,8 +114,9 @@ changes.
 app/
   api/            FastAPI app (health, competitions, teams, fixtures, data-quality,
                   models, model-performance, backtests, calibration,
-                  league-parameters, team-strength, forecast/predictions, sync);
-                  its lifespan starts the background scheduler when enabled
+                  league-parameters, team-strength, forecast/predictions, sync,
+                  monitoring); its lifespan starts the background scheduler
+                  when enabled
   data/
     providers/    FootballDataProvider ABC, DTOs, adapters (mock, football-data.org)
     mock_fixtures/  Static "world" the mock provider generates fixtures from
@@ -131,6 +133,9 @@ app/
                                  error, reliability curves (section 36) — shared by
                                  walk-forward backtesting, ensemble weight learning
                                  and calibration fitting
+    drift_metrics.py             PSI, Jensen-Shannon divergence, z-score — pure
+                                 functions shared by drift_detection.py and
+                                 ood_detection.py
   services/
     identifiers.py             canonical "<provider>:<native_id>" ID scheme
     enum_utils.py               defensive provider-string -> enum parsing
@@ -154,6 +159,8 @@ app/
     ensemble.py                  learns ModelWeight per competition from backtest results (section 34)
     calibration.py               isotonic/Platt/beta calibration of P(home win) (section 37)
     forecast_service.py         quality gate -> ensemble score matrix -> prediction registry (section 61)
+    drift_detection.py           model/data drift checks (section 42) persisted as ModelMonitoring rows
+    ood_detection.py             per-forecast out-of-distribution flags that widen uncertainty (section 40)
     sync_orchestrator.py        wires all of the above into one full-sync run
     sync_report.py               renders the section-63 synchronization report from a FullSyncReport
     scheduler.py                 optional background full-sync on a fixed interval (section 13/64)
@@ -167,7 +174,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   hierarchical shrinkage, market models, xG model, league
                   parameters, score matrix, evaluation metrics, walk-forward
                   backtesting, ensemble, calibration, sync report, scheduler,
-                  forecast service, full-sync orchestration, DB constraints)
+                  forecast service, full-sync orchestration, drift metrics,
+                  drift detection, OOD detection, DB constraints)
 ```
 
 ### Database
@@ -461,6 +469,65 @@ to satisfy sections 34-37.
    cadences section 13 illustrates — a natural follow-up once the pipeline
    itself is split into independently-runnable stages.
 
+### Monitoring, drift and OOD detection (Phase 9)
+
+1. **Drift metrics** (`app/evaluation/drift_metrics.py`) — three pure,
+   dependency-free functions shared by everything below: Population
+   Stability Index (`population_stability_index`, for comparing two
+   parameter or feature distributions), Jensen-Shannon divergence
+   (`jensen_shannon_divergence`, for comparing two probability
+   distributions), and a plain `z_score`. All three return a neutral
+   default (`0.0`/`None`) on degenerate input — an empty sample or zero
+   variance — rather than raising, since a missing comparison is a "nothing
+   to report" case, not an error.
+2. **Model/data drift detection** (`drift_detection.py`, section 42) —
+   `DriftDetectionService.run()` checks four things every full sync, once
+   per competition, after that competition's models are trained: (a)
+   **team-strength drift** — the two most recent `TeamStrength` snapshots
+   per team, z-scored against `drift_team_strength_threshold`; (b)
+   **parameter drift** — PSI between the most recently RETIRED and current
+   ENABLED `ModelVersion`'s attack parameters, against
+   `drift_psi_threshold`; (c) **probability drift** — Jensen-Shannon
+   divergence between the RETIRED and ENABLED version's published
+   `home_win` probabilities, skipped unless both sides have at least
+   `drift_min_predictions_for_probability_drift` predictions; (d)
+   **scoring-environment drift** — the change in `avg_total_goals` between
+   a competition's most recent FINISHED season and its current ACTIVE one,
+   against `drift_scoring_environment_threshold`. Every check's result is
+   **inserted** as a `ModelMonitoring` row — never overwritten, so this is a
+   real time series an administrator can chart, unlike `CalibrationResult`
+   which is intentionally kept as a single current snapshot per
+   (model, competition). A breach also logs a `MODEL_DRIFT_DETECTED`
+   `SystemEvent` and is surfaced in the section-63 sync report's
+   `models_requiring_review` list. What this does **not** detect: squad or
+   managerial changes, tactical-profile shifts, or a competition-format
+   change — none of that is in the data model yet, so drift here is purely
+   statistical (parameters, probabilities, scoring rates), not causal.
+3. **Out-of-distribution (OOD) detection** (`ood_detection.py`, section 40)
+   — unlike drift detection (a periodic, sync-time check),
+   `OODDetectionService.detect()` runs on **every forecast**, inline in
+   `ForecastService.generate()`. It flags — but never blocks — a forecast
+   when: the competition has fewer than
+   `ood_min_matches_for_established_competition` historical matches; the
+   predicted total goals is an extreme z-score against the competition's
+   historical scoring distribution
+   (`ood_expected_goals_zscore_threshold`); or either team has too few
+   `TeamStrength` snapshots to be considered established
+   (`ood_min_snapshots_for_established_team`) or its latest attack strength
+   is an extreme z-score against its own history
+   (`ood_team_strength_zscore_threshold`). A zero-snapshot team is flagged
+   as sparse history rather than crashing. Being OOD never fails a
+   forecast the way an unseen team does (still a hard
+   `FAILED_VALIDATION`) — instead it sets `ood_status`/`ood_flags` on the
+   `Prediction` and inflates both `aleatoric_uncertainty` and
+   `epistemic_uncertainty` by `ood_uncertainty_inflation_factor`, so the
+   forecast honestly widens rather than silently degrading.
+4. **API surface** — `GET /monitoring` (filterable by `competition`,
+   `model_name`, `metric_name`, `breached_only`) exposes the
+   `ModelMonitoring` time series; `ood_flags` now appears alongside the
+   existing `ood_status` in every forecast's `model_diagnostics`, on both
+   `POST /forecast` and `GET /predictions/{fixture}`.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -471,7 +538,7 @@ to satisfy sections 34-37.
 6. **Ensemble + calibration + uncertainty** — done
 7. **Walk-forward backtesting + model evaluation** — done
 8. **Automatic league/season synchronization (fixtures, results, full sync report)** — done
-9. Monitoring + drift detection + OOD detection
+9. **Monitoring + drift detection + OOD detection** — done
 10. Administrator dashboard + authentication/RBAC
 11. Champion/challenger deployment + rollback
 12. Testing hardening + production deployment

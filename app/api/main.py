@@ -40,6 +40,7 @@ from app.api.schemas import (
     ModelPerformanceOut,
     ModelVersionDetailOut,
     ModelVersionSummaryOut,
+    MonitoringOut,
     MovementReportOut,
     OutcomeDistributionOut,
     RateMarketForecastOut,
@@ -57,6 +58,7 @@ from app.database.models.enums import CompetitionStatus
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
+from app.database.models.monitoring import ModelMonitoring
 from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
@@ -376,6 +378,48 @@ def model_performance(
     return out
 
 
+@app.get("/monitoring", response_model=list[MonitoringOut])
+def monitoring(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    model_name: str | None = Query(default=None),
+    metric_name: str | None = Query(default=None, description="e.g. team_strength_drift, feature_drift_psi, probability_drift_js, scoring_environment_drift"),
+    breached_only: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> list[MonitoringOut]:
+    """Model/data drift history (section 42) — every check ever run is kept,
+    so this is a real time series rather than a single latest snapshot."""
+    query = (
+        db.query(ModelMonitoring, ModelVersion, Competition.canonical_competition_id)
+        .join(ModelVersion, ModelMonitoring.model_version_id == ModelVersion.id)
+        .join(Competition, ModelMonitoring.competition_id == Competition.id)
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+    if model_name:
+        query = query.filter(ModelVersion.model_name == model_name)
+    if metric_name:
+        query = query.filter(ModelMonitoring.metric_name == metric_name)
+    if breached_only:
+        query = query.filter(ModelMonitoring.breached.is_(True))
+
+    out = []
+    for record, mv, comp_canonical in query.order_by(ModelMonitoring.evaluated_at.desc()).all():
+        out.append(
+            MonitoringOut(
+                competition_canonical_id=comp_canonical,
+                model_name=mv.model_name,
+                model_version=mv.version,
+                metric_name=record.metric_name,
+                metric_value=record.metric_value,
+                threshold=record.threshold,
+                breached=record.breached,
+                detail=record.detail,
+                evaluated_at=record.evaluated_at,
+            )
+        )
+    return out
+
+
 @app.get("/backtests", response_model=list[BacktestOut])
 def backtests(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
@@ -499,6 +543,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
 
     calibration_diag = validation.get("calibration")
     calibration_out = CalibrationDiagnosticOut(**calibration_diag) if calibration_diag else None
+    ood_flags = validation.get("ood_flags") or []
 
     supplementary = prediction.supplementary_markets or {}
 
@@ -546,6 +591,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
             epistemic_uncertainty=prediction.epistemic_uncertainty,
             data_quality_score=prediction.data_quality_score,
             ood_status=prediction.ood_status,
+            ood_flags=ood_flags,
         ),
         model_information=ModelInformationOut(
             champion_model=champion_name,

@@ -99,6 +99,24 @@ class Settings(BaseSettings):
     scheduler_enabled: bool = False
     full_sync_interval_hours: int = 6
 
+    # Out-of-distribution detection (section 40) — soft signals that flag a
+    # forecast rather than block it; a completely unseen team still hard-fails
+    # in ForecastService's quality gate regardless of these.
+    ood_expected_goals_zscore_threshold: float = 3.0
+    ood_team_strength_zscore_threshold: float = 3.0
+    ood_min_snapshots_for_established_team: int = 3
+    ood_min_matches_for_established_competition: int = 15
+    ood_uncertainty_inflation_factor: float = 1.5
+
+    # Model/data drift detection (section 42) — persisted as ModelMonitoring
+    # rows; "breached" triggers a SystemEvent for administrator review
+    # (section 49's "consider retraining" signal), never an automatic retrain.
+    drift_psi_threshold: float = 0.25
+    drift_team_strength_threshold: float = 0.75
+    drift_scoring_environment_threshold: float = 0.5
+    drift_min_predictions_for_probability_drift: int = 10
+    drift_js_divergence_threshold: float = 0.1
+
 
 @lru_cache
 def get_settings() -> Settings:

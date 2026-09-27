@@ -7,7 +7,8 @@ quality -> calculate league baselines -> evaluate model eligibility -> train
 Dixon-Coles/Poisson/hierarchical/team-strength models -> train the
 independent first-half/corners/cards/xG models (Phase 5) -> walk-forward
 backtest the goal-based candidates once and use that same result to learn
-ensemble weights and fit calibration (Phase 6/7).
+ensemble weights and fit calibration (Phase 6/7) -> check for model/data
+drift (Phase 9).
 """
 from __future__ import annotations
 
@@ -19,13 +20,14 @@ from sqlalchemy.orm import Session
 from app.data.providers.base import FootballDataProvider
 from app.database.models.competitions import Competition, Season
 from app.database.models.enums import DataQualityStatus, SeasonStatus
+from app.database.models.modeling import ModelVersion
 from app.database.models.monitoring import SystemEvent
 from app.logging_config import get_logger
-from app.database.models.modeling import ModelVersion
 from app.services.backtesting import BacktestingService
 from app.services.calibration import CalibrationTrainingReport, CalibrationService
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
 from app.services.data_quality import DataQualityService
+from app.services.drift_detection import DriftDetectionService, DriftReport
 from app.services.ensemble import EnsembleService, EnsembleTrainingReport
 from app.services.fixture_sync import FixtureSyncService
 from app.services.league_parameters import LeagueParameterService
@@ -68,6 +70,7 @@ class FullSyncReport:
     model_training: dict[str, ModelTrainingReport] = field(default_factory=dict)
     ensemble_training: dict[str, EnsembleTrainingReport] = field(default_factory=dict)
     calibration_training: dict[str, CalibrationTrainingReport] = field(default_factory=dict)
+    drift: dict[str, DriftReport] = field(default_factory=dict)
     models_activated: list[str] = field(default_factory=list)
     models_disabled: list[str] = field(default_factory=list)
     models_requiring_review: list[str] = field(default_factory=list)
@@ -190,6 +193,16 @@ class FullSyncService:
         report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(
             competition, backtest_reports
         )
+
+        # Drift detection (section 42) runs last, once every ModelVersion/
+        # TeamStrength/LeagueParameter row this run could produce already
+        # exists — it only ever compares what's already been persisted.
+        drift_report = DriftDetectionService(self.db).run(competition)
+        report.drift[competition.canonical_competition_id] = drift_report
+        for finding in drift_report.breached:
+            report.models_requiring_review.append(
+                f"{competition.canonical_competition_id}:{finding.metric_name} ({finding.metric_value:.4f} > {finding.threshold})"
+            )
 
         self._record_model_activation(competition, report)
 

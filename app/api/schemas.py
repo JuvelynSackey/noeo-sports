@@ -214,6 +214,23 @@ class ModelPerformanceOut(BaseModel):
     evaluated_at: dt.datetime
 
 
+class MonitoringOut(BaseModel):
+    """Model/data drift findings (section 42) — a real time series, since
+    ModelMonitoring rows are always inserted, never overwritten."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    model_name: str
+    model_version: str
+    metric_name: str
+    metric_value: float
+    threshold: float | None
+    breached: bool
+    detail: dict | None
+    evaluated_at: dt.datetime
+
+
 class BacktestOut(BaseModel):
     """Full walk-forward backtest detail (sections 35-36), including the
     section-36 diagnostics that don't fit the summary /model-performance
@@ -293,6 +310,7 @@ class ModelDiagnosticsOut(BaseModel):
     epistemic_uncertainty: float | None
     data_quality_score: float | None
     ood_status: bool
+    ood_flags: list[str] = []
 
 
 class ModelInformationOut(BaseModel):

@@ -48,6 +48,7 @@ from app.models.goal_model import GoalModel, GoalModelFit
 from app.services.calibration import apply_calibration
 from app.services.market_models import CARDS_MODEL, CORNERS_MODEL, FIRST_HALF_MODEL
 from app.services.model_training import DIXON_COLES
+from app.services.ood_detection import OODDetectionService
 
 logger = get_logger(__name__)
 
@@ -72,6 +73,7 @@ class ForecastResult:
     data_quality_score: float | None = None
     model_disagreement_level: str | None = None
     ood_status: bool = False
+    ood_flags: list[str] = field(default_factory=list)
     champion_model: str | None = None
     supporting_models: list[str] = field(default_factory=list)
     ensemble_weights: dict[str, float] = field(default_factory=dict)
@@ -210,6 +212,18 @@ class ForecastService:
         result.most_probable_scorelines = scorelines
         result.aleatoric_uncertainty = (lam_h + lam_a) ** 0.5  # intrinsic scoring randomness (Poisson-scale proxy)
         result.epistemic_uncertainty = self._epistemic_uncertainty(champion, home_id, away_id)
+
+        # --- Out-of-distribution detection (section 40) — a fixture the
+        # model *can* score but that looks statistically unusual doesn't
+        # fail validation; it widens uncertainty and gets flagged instead.
+        ood = OODDetectionService(self.db, self.settings).detect(competition, home_id, away_id, lam_h, lam_a)
+        if ood.is_ood:
+            result.ood_status = True
+            result.ood_flags = ood.flags
+            warnings.extend(f"OOD: {flag}" for flag in ood.flags)
+            if result.epistemic_uncertainty is not None:
+                result.epistemic_uncertainty *= self.settings.ood_uncertainty_inflation_factor
+            result.aleatoric_uncertainty *= self.settings.ood_uncertainty_inflation_factor
 
         result.calibration = self._calibration_diagnostic(champion, outcomes)
 
@@ -449,6 +463,7 @@ class ForecastService:
             "warnings": warnings,
             "ensemble_weights": result.ensemble_weights,
             "calibration": result.calibration,
+            "ood_flags": result.ood_flags,
         }
 
         prediction = Prediction(
