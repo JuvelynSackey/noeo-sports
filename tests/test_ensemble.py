@@ -71,7 +71,8 @@ def _seed_realistic_league(db_session, n_rounds: int = 6, settings: Settings | N
 
 
 def test_ensemble_trains_and_persists_normalized_weights(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20,
+                         ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)  # 4*30 = 120 matches
 
     ModelTrainingService(db_session, settings).train(competition)
@@ -88,7 +89,8 @@ def test_ensemble_trains_and_persists_normalized_weights(db_session):
 
 
 def test_ensemble_skips_when_too_little_data(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=50, ensemble_min_validation_matches=20)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=50, backtest_fold_size=20,
+                         ensemble_min_validation_matches=20)
     competition = _seed_realistic_league(db_session, n_rounds=1, settings=settings)  # only 30 matches
 
     ModelTrainingService(db_session, settings).train(competition)
@@ -104,7 +106,8 @@ def test_better_model_gets_more_weight(db_session):
     # favors dixon_coles/poisson roughly equally) — verify at least that a
     # completely mismatched "model" (poisson fit on shuffled/degenerate data)
     # would not dominate. Simpler: just check weights are all positive and finite.
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20,
+                         ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
 
     ModelTrainingService(db_session, settings).train(competition)
@@ -113,17 +116,18 @@ def test_better_model_gets_more_weight(db_session):
     for c in report.candidates:
         assert c.weight > 0.0
         assert c.weight < 1.0
-        assert c.metrics.n_matches > 0
+        assert c.report.metrics.n_matches > 0
 
 
-def test_ensemble_persists_validation_metrics_per_candidate(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+def test_ensemble_persists_walk_forward_backtest_per_candidate(db_session):
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20,
+                         ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
 
     ModelTrainingService(db_session, settings).train(competition)
     EnsembleService(db_session, settings).train(competition)
 
-    records = db_session.query(CalibrationResult).filter_by(competition_id=competition.id, forecast_type="ensemble_validation").all()
+    records = db_session.query(CalibrationResult).filter_by(competition_id=competition.id, forecast_type="walk_forward_backtest").all()
     assert len(records) == 3
     for record in records:
         assert record.method in {"dixon_coles", "poisson_baseline", "hierarchical_model"}
@@ -133,7 +137,8 @@ def test_ensemble_persists_validation_metrics_per_candidate(db_session):
 
 
 def test_rerun_replaces_rather_than_duplicates_weights(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20,
+                         ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
 
     service = EnsembleService(db_session, settings)

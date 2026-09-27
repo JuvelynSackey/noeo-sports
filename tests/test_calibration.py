@@ -7,8 +7,17 @@ from app.services.model_training import ModelTrainingService
 from tests.test_ensemble import _seed_realistic_league
 
 
+def _calibration_record(db_session, competition):
+    return (
+        db_session.query(CalibrationResult)
+        .filter_by(competition_id=competition.id, forecast_type="outcome_probabilities")
+        .one()
+    )
+
+
 def test_calibration_skipped_with_too_few_validation_matches(db_session):
-    settings = Settings(min_matches_for_model_fit=10, calibration_min_validation_matches=50)
+    settings = Settings(min_matches_for_model_fit=10, calibration_min_validation_matches=50,
+                         backtest_initial_train_matches=15, backtest_fold_size=20)
     competition = _seed_realistic_league(db_session, n_rounds=1, settings=settings)  # 30 matches total
     ModelTrainingService(db_session, settings).train(competition)
 
@@ -16,12 +25,17 @@ def test_calibration_skipped_with_too_few_validation_matches(db_session):
 
     assert not report.fitted
     assert report.skipped_reason
-    assert db_session.query(CalibrationResult).filter_by(competition_id=competition.id).count() == 0
+    assert (
+        db_session.query(CalibrationResult)
+        .filter_by(competition_id=competition.id, forecast_type="outcome_probabilities")
+        .count()
+        == 0
+    )
 
 
 def test_calibration_fits_and_persists_with_enough_data(db_session):
     settings = Settings(min_matches_for_model_fit=10, calibration_min_validation_matches=15,
-                         ensemble_validation_fraction=0.3, calibration_method="isotonic")
+                         backtest_initial_train_matches=15, backtest_fold_size=20, calibration_method="isotonic")
     competition = _seed_realistic_league(db_session, n_rounds=6, settings=settings)  # 180 matches
     ModelTrainingService(db_session, settings).train(competition)
 
@@ -31,7 +45,7 @@ def test_calibration_fits_and_persists_with_enough_data(db_session):
     assert report.method == "isotonic"
     assert report.n_validation >= 15
 
-    record = db_session.query(CalibrationResult).filter_by(competition_id=competition.id).one()
+    record = _calibration_record(db_session, competition)
     assert record.method == "isotonic"
     assert record.brier_score is not None
     assert record.log_loss is not None
@@ -43,7 +57,7 @@ def test_calibration_fits_and_persists_with_enough_data(db_session):
 
 def test_rerun_updates_existing_calibration_record(db_session):
     settings = Settings(min_matches_for_model_fit=10, calibration_min_validation_matches=15,
-                         ensemble_validation_fraction=0.3)
+                         backtest_initial_train_matches=15, backtest_fold_size=20)
     competition = _seed_realistic_league(db_session, n_rounds=6, settings=settings)
     ModelTrainingService(db_session, settings).train(competition)
 
@@ -51,20 +65,25 @@ def test_rerun_updates_existing_calibration_record(db_session):
     service.train(competition)
     service.train(competition)
 
-    assert db_session.query(CalibrationResult).filter_by(competition_id=competition.id).count() == 1
+    assert (
+        db_session.query(CalibrationResult)
+        .filter_by(competition_id=competition.id, forecast_type="outcome_probabilities")
+        .count()
+        == 1
+    )
 
 
 @pytest.mark.parametrize("method", ["isotonic", "platt", "beta"])
 def test_all_three_methods_fit_without_error(db_session, method):
     settings = Settings(min_matches_for_model_fit=10, calibration_min_validation_matches=15,
-                         ensemble_validation_fraction=0.3, calibration_method=method)
+                         backtest_initial_train_matches=15, backtest_fold_size=20, calibration_method=method)
     competition = _seed_realistic_league(db_session, n_rounds=6, settings=settings)
     ModelTrainingService(db_session, settings).train(competition)
 
     report = CalibrationService(db_session, settings).train(competition)
 
     assert report.fitted
-    record = db_session.query(CalibrationResult).filter_by(competition_id=competition.id).one()
+    record = _calibration_record(db_session, competition)
     assert record.calibration_map["method"] == method
 
 

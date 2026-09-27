@@ -5,8 +5,9 @@ sync). Wires together: discover competitions/seasons -> map teams -> sync
 fixtures/results/statistics/xG -> detect promotion/relegation -> score data
 quality -> calculate league baselines -> evaluate model eligibility -> train
 Dixon-Coles/Poisson/hierarchical/team-strength models -> train the
-independent first-half/corners/cards/xG models (Phase 5) -> learn ensemble
-weights and fit calibration from a holdout split (Phase 6).
+independent first-half/corners/cards/xG models (Phase 5) -> walk-forward
+backtest the goal-based candidates once and use that same result to learn
+ensemble weights and fit calibration (Phase 6/7).
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from app.database.models.competitions import Competition, Season
 from app.database.models.enums import DataQualityStatus, SeasonStatus
 from app.database.models.monitoring import SystemEvent
 from app.logging_config import get_logger
+from app.services.backtesting import BacktestingService
 from app.services.calibration import CalibrationTrainingReport, CalibrationService
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
 from app.services.data_quality import DataQualityService
@@ -143,8 +145,15 @@ class FullSyncService:
         market_service.train_cards(competition)
         XGModelService(self.db).train(competition)
 
-        # Ensemble weights and calibration both need the production Dixon-Coles/
-        # Poisson/hierarchical ModelVersions above to already exist, since they
-        # attach their results to those rows.
-        report.ensemble_training[competition.canonical_competition_id] = EnsembleService(self.db).train(competition)
-        report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(competition)
+        # Walk-forward backtest each goal-based candidate once (section 35), then
+        # feed that same result to both ensemble weighting and calibration rather
+        # than each recomputing its own out-of-sample predictions. Both need the
+        # production Dixon-Coles/Poisson/hierarchical ModelVersions above to
+        # already exist, since they attach their results to those rows.
+        backtest_reports = BacktestingService(self.db).run_all(competition)
+        report.ensemble_training[competition.canonical_competition_id] = EnsembleService(self.db).train(
+            competition, backtest_reports
+        )
+        report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(
+            competition, backtest_reports
+        )

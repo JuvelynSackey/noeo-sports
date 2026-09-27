@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.api.schemas import (
     AdministratorNotesOut,
+    BacktestOut,
     CalibrationDiagnosticOut,
     CalibrationOut,
     CompetitionDetailOut,
@@ -313,13 +314,14 @@ def model_performance(
     competition: str | None = Query(default=None, description="canonical_competition_id"),
     db: Session = Depends(get_db),
 ) -> list[ModelPerformanceOut]:
-    """Held-out validation performance from ensemble weight learning
-    (sections 34/36) — not yet the full walk-forward evaluation of Phase 7."""
+    """Walk-forward backtest performance (sections 35/36): pooled
+    out-of-sample metrics across every fold, not a single train/validation
+    split — this is also what ensemble weight learning (section 34) uses."""
     query = (
         db.query(CalibrationResult, ModelVersion, Competition.canonical_competition_id)
         .join(ModelVersion, CalibrationResult.model_version_id == ModelVersion.id)
         .join(Competition, CalibrationResult.competition_id == Competition.id)
-        .filter(CalibrationResult.forecast_type == "ensemble_validation")
+        .filter(CalibrationResult.forecast_type == "walk_forward_backtest")
     )
     if competition:
         query = query.filter(Competition.canonical_competition_id == competition)
@@ -327,6 +329,7 @@ def model_performance(
     out = []
     for record, mv, comp_canonical in query.all():
         weight_row = db.query(ModelWeight).filter_by(model_version_id=mv.id, competition_id=mv.competition_id).first()
+        detail = record.reliability_curve or {}
         out.append(
             ModelPerformanceOut(
                 competition_canonical_id=comp_canonical,
@@ -336,6 +339,58 @@ def model_performance(
                 brier_score=record.brier_score,
                 log_loss=record.log_loss,
                 ranked_probability_score=record.ranked_probability_score,
+                n_folds=detail.get("n_folds"),
+                n_predictions=detail.get("n_predictions"),
+                exact_score_mean_probability=detail.get("exact_score_mean_probability"),
+                total_goals_rmse=detail.get("total_goals_rmse"),
+                evaluated_at=record.evaluated_at,
+            )
+        )
+    return out
+
+
+@app.get("/backtests", response_model=list[BacktestOut])
+def backtests(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    model_name: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> list[BacktestOut]:
+    """Full walk-forward backtest detail (sections 35-36) — every fold's
+    pooled out-of-sample performance, including exact-scoreline probability
+    quality and home/away goal-count residuals for detecting systematic bias."""
+    query = (
+        db.query(CalibrationResult, ModelVersion, Competition.canonical_competition_id)
+        .join(ModelVersion, CalibrationResult.model_version_id == ModelVersion.id)
+        .join(Competition, CalibrationResult.competition_id == Competition.id)
+        .filter(CalibrationResult.forecast_type == "walk_forward_backtest")
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+    if model_name:
+        query = query.filter(ModelVersion.model_name == model_name)
+
+    out = []
+    for record, mv, comp_canonical in query.all():
+        detail = record.reliability_curve or {}
+        out.append(
+            BacktestOut(
+                competition_canonical_id=comp_canonical,
+                model_name=mv.model_name,
+                model_version=mv.version,
+                n_folds=detail.get("n_folds"),
+                n_predictions=detail.get("n_predictions"),
+                brier_score=record.brier_score,
+                log_loss=record.log_loss,
+                ranked_probability_score=record.ranked_probability_score,
+                calibration_error=record.calibration_error,
+                exact_score_mean_log_loss=detail.get("exact_score_mean_log_loss"),
+                exact_score_mean_probability=detail.get("exact_score_mean_probability"),
+                home_goal_residual_mean=detail.get("home_goal_residual_mean"),
+                home_goal_residual_std=detail.get("home_goal_residual_std"),
+                away_goal_residual_mean=detail.get("away_goal_residual_mean"),
+                away_goal_residual_std=detail.get("away_goal_residual_std"),
+                total_goals_rmse=detail.get("total_goals_rmse"),
+                reliability_curve=detail.get("points"),
                 evaluated_at=record.evaluated_at,
             )
         )

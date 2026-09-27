@@ -182,8 +182,8 @@ class ModelVersionDetailOut(ModelVersionSummaryOut):
 
 
 class ModelPerformanceOut(BaseModel):
-    """Held-out validation performance from ensemble weight learning
-    (section 34/36) — not yet the full walk-forward evaluation of Phase 7."""
+    """Walk-forward backtest performance (sections 35/36): pooled
+    out-of-sample metrics across every expanding-window fold."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -194,6 +194,37 @@ class ModelPerformanceOut(BaseModel):
     brier_score: float | None
     log_loss: float | None
     ranked_probability_score: float | None
+    n_folds: int | None = None
+    n_predictions: int | None = None
+    exact_score_mean_probability: float | None = None
+    total_goals_rmse: float | None = None
+    evaluated_at: dt.datetime
+
+
+class BacktestOut(BaseModel):
+    """Full walk-forward backtest detail (sections 35-36), including the
+    section-36 diagnostics that don't fit the summary /model-performance
+    view: exact-scoreline probability quality and goal-count residuals."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    model_name: str
+    model_version: str
+    n_folds: int | None
+    n_predictions: int | None
+    brier_score: float | None
+    log_loss: float | None
+    ranked_probability_score: float | None
+    calibration_error: float | None
+    exact_score_mean_log_loss: float | None
+    exact_score_mean_probability: float | None
+    home_goal_residual_mean: float | None
+    home_goal_residual_std: float | None
+    away_goal_residual_mean: float | None
+    away_goal_residual_std: float | None
+    total_goals_rmse: float | None
+    reliability_curve: list[dict] | None
     evaluated_at: dt.datetime
 
 

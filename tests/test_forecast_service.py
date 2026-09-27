@@ -123,7 +123,7 @@ def test_missing_supplementary_markets_degrade_gracefully(db_session):
 
 
 def test_ensemble_blend_differs_from_single_champion_matrix(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20, ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
     ModelTrainingService(db_session, settings).train(competition)
     ensemble_report = EnsembleService(db_session, settings).train(competition)
@@ -163,7 +163,7 @@ def test_ensemble_blend_differs_from_single_champion_matrix(db_session):
 
 
 def test_calibration_diagnostic_surfaced_when_available(db_session):
-    settings = Settings(min_matches_for_model_fit=10, ensemble_min_train_matches=10, ensemble_min_validation_matches=5)
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20, ensemble_min_validation_matches=5)
     competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
     ModelTrainingService(db_session, settings).train(competition)
 
