@@ -141,6 +141,21 @@ class Settings(BaseSettings):
     champion_challenger_min_new_matches: int = 5
     champion_challenger_log_loss_tolerance: float = 0.02
 
+    # Conformal (distribution-free) uncertainty (section 44) — calibrated from
+    # walk-forward backtesting's pooled out-of-sample predictions for the
+    # champion dixon_coles model, split chronologically into a calibration
+    # fold and a disjoint, later test fold (never a random split, to keep
+    # faith with the project's "no future information" rule).
+    conformal_alpha: float = 0.1  # miscoverage level -> 90% target coverage
+    conformal_calibration_fraction: float = 0.5  # share of pooled OOS predictions used to calibrate vs. test
+    conformal_min_predictions: int = 20  # below this, skip entirely rather than fit an unstable threshold
+
+    # Monte Carlo season simulation (section 42).
+    simulation_default_n: int = 10000
+    simulation_max_n: int = 100000
+    simulation_top_n_spots: int = 4
+    simulation_relegation_spots: int = 3
+
 
 @lru_cache
 def get_settings() -> Settings:

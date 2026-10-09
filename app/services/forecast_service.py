@@ -28,7 +28,7 @@ from app.config import APP_VERSION, Settings, get_settings
 from app.database.models.competitions import Competition
 from app.database.models.enums import DataQualityStatus, DisagreementLevel, ForecastStatus
 from app.database.models.fixtures import Fixture
-from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
+from app.database.models.modeling import CalibrationResult, ConformalCalibration, ModelVersion, ModelWeight
 from app.database.models.predictions import Prediction, PredictionSnapshot
 from app.database.models.quality import DataQuality
 from app.database.models.teams import Team
@@ -43,6 +43,7 @@ from app.forecasting.score_matrix import (
     outcome_probabilities,
     over_under_probabilities,
 )
+from app.evaluation.conformal import outcome_prediction_set
 from app.logging_config import get_logger
 from app.models.goal_model import GoalModel, GoalModelFit
 from app.services.calibration import apply_calibration
@@ -83,6 +84,7 @@ class ForecastResult:
     warnings: list[str] = field(default_factory=list)
     supplementary_markets: dict = field(default_factory=dict)
     calibration: dict | None = None
+    conformal: dict | None = None
 
 
 def _fit_from_model_version(mv: ModelVersion) -> GoalModelFit:
@@ -213,6 +215,7 @@ class ForecastService:
             result.aleatoric_uncertainty *= self.settings.ood_uncertainty_inflation_factor
 
         result.calibration = self._calibration_diagnostic(champion, outcomes)
+        result.conformal = self._conformal_diagnostic(champion, lam_h, lam_a, outcomes)
 
         if data_quality is None:
             warnings.append("no data-quality record found for this competition/season")
@@ -404,6 +407,50 @@ class ForecastService:
             "log_loss": record.log_loss,
         }
 
+    def _conformal_diagnostic(
+        self, champion: ModelVersion, expected_home_goals: float, expected_away_goals: float, outcomes: dict[str, float]
+    ) -> dict | None:
+        """Distribution-free prediction intervals/sets (section 44) — None
+        entirely (not a fabricated default interval) whenever any target
+        hasn't been calibrated yet, e.g. too little walk-forward backtest
+        history. Intervals are centered on the published point estimate,
+        not independently re-derived, so they can never contradict it."""
+        records = {
+            r.target: r
+            for r in self.db.query(ConformalCalibration)
+            .filter_by(model_version_id=champion.id, competition_id=champion.competition_id)
+            .all()
+        }
+        if not records:
+            return None
+
+        def _interval(target: str, point_estimate: float) -> dict | None:
+            record = records.get(target)
+            if record is None:
+                return None
+            return {
+                "point_estimate": point_estimate,
+                "lower": max(0.0, point_estimate - record.quantile),
+                "upper": point_estimate + record.quantile,
+                "target_coverage": 1.0 - record.alpha,
+                "empirical_coverage": record.empirical_coverage,
+            }
+
+        conformal: dict = {
+            "home_goals": _interval("home_goals", expected_home_goals),
+            "away_goals": _interval("away_goals", expected_away_goals),
+            "total_goals": _interval("total_goals", expected_home_goals + expected_away_goals),
+        }
+
+        outcome_record = records.get("outcome")
+        if outcome_record is not None:
+            conformal["outcome_prediction_set"] = outcome_prediction_set(outcomes, outcome_record.quantile)
+            conformal["outcome_target_coverage"] = 1.0 - outcome_record.alpha
+
+        if all(v is None for v in conformal.values()):
+            return None
+        return conformal
+
     def _epistemic_uncertainty(self, model_version: ModelVersion, home_id: str, away_id: str) -> float | None:
         # Standard errors aren't persisted on ModelVersion itself (only used
         # transiently to populate TeamStrength.uncertainty); fall back to None
@@ -450,6 +497,7 @@ class ForecastService:
             "warnings": warnings,
             "ensemble_weights": result.ensemble_weights,
             "calibration": result.calibration,
+            "conformal": result.conformal,
             "ood_flags": result.ood_flags,
         }
 

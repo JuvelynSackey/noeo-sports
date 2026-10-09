@@ -70,3 +70,29 @@ class CalibrationResult(Base, TimestampMixin):
     # so it can be reapplied to future forecasts rather than only measured.
     calibration_map: Mapped[dict | None] = mapped_column(JSON)
     evaluated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ConformalCalibration(Base, TimestampMixin):
+    """Distribution-free (conformal) uncertainty calibration — section 44.
+    Upserted per (model_version, competition, target), mirroring
+    CalibrationResult's overwrite-in-place semantics rather than
+    ModelMonitoring's append-only history, since this is "the current best
+    calibration for this model," not a time series."""
+
+    __tablename__ = "conformal_calibrations"
+    __table_args__ = (UniqueConstraint("model_version_id", "competition_id", "target", name="uq_conformal_calibration"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"), nullable=False, index=True)
+    competition_id: Mapped[int] = mapped_column(ForeignKey("competitions.id"), nullable=False, index=True)
+    target: Mapped[str] = mapped_column(String(64), nullable=False)  # home_goals | away_goals | total_goals | outcome
+    method: Mapped[str] = mapped_column(String(64), nullable=False, default="split_conformal")
+    alpha: Mapped[float] = mapped_column(Float, nullable=False)
+    # Regression targets: the interval's half-width. Classification (outcome)
+    # target: the nonconformity threshold tau. One field serves both, since
+    # both are simply "the calibrated split-conformal quantile."
+    quantile: Mapped[float] = mapped_column(Float, nullable=False)
+    n_calibration: Mapped[int] = mapped_column(nullable=False)
+    n_test: Mapped[int] = mapped_column(nullable=False)
+    empirical_coverage: Mapped[float | None] = mapped_column(Float)
+    evaluated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

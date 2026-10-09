@@ -30,14 +30,18 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 10 — Authentication, role-based access control, and audit logging.**
 - **Phase 11 — Champion/challenger deployment and rollback.**
 - **Phase 12 — Testing hardening and production deployment.**
+- **Phase 13 — Monte Carlo season simulation and conformal uncertainty.**
 
-Every phase in the roadmap now has an initial implementation. That means
-"feature-complete against the 12-phase plan," not "battle-tested in
-production" — see the **Testing hardening and production deployment**
-section below for what Phase 12 actually covers and, just as importantly,
-what it explicitly does not (load testing, a live run against a real
-provider over time, multi-instance scaling of the scheduler). Note on
-scope: "administrator dashboard" in the roadmap is
+Every phase in the original 12-phase roadmap has an initial implementation.
+That means "feature-complete against the 12-phase plan," not
+"battle-tested in production" — see the **Testing hardening and production
+deployment** section below for what Phase 12 actually covers and, just as
+importantly, what it explicitly does not (load testing, a live run against
+a real provider over time, multi-instance scaling of the scheduler). Phase
+13 extends the platform beyond that original 12-phase plan with two
+specific capabilities — see **Monte Carlo season simulation and conformal
+uncertainty** below for scope and what's deliberately still out of scope.
+Note on scope: "administrator dashboard" in the roadmap is
 delivered here as a secured, role-gated **API** (the diagnostics endpoints
 built in Phases 6-9, now behind auth) rather than a separate browser
 front-end — consistent with every prior phase, which is API-only with no UI
@@ -67,11 +71,14 @@ uvicorn app.api.main:app --reload
 #       GET  http://127.0.0.1:8000/model-performance?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/backtests?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/calibration?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/conformal?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/league-parameters?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/teams/mock:MT-01/strength
 #       POST http://127.0.0.1:8000/forecast?fixture=mock:MOCK-D1:2026:003
 #       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003
 #       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003/distribution
+#       POST http://127.0.0.1:8000/simulations?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/simulations?competition=mock:MOCK-D1
 
 python scripts/generate_forecasts.py --competition mock:MOCK-D1 --limit 5
 ```
@@ -125,10 +132,11 @@ changes.
 app/
   api/            FastAPI app (health, auth/users/audit-logs, competitions,
                   teams, fixtures, data-quality, models (+ rollback),
-                  model-performance, backtests, calibration, league-parameters,
-                  team-strength, forecast/predictions, sync, monitoring);
-                  its lifespan starts the background scheduler when enabled
-                  and runs the Phase 12 production-safety check
+                  model-performance, backtests, calibration, conformal,
+                  league-parameters, team-strength, forecast/predictions,
+                  simulations, sync, monitoring); its lifespan starts the
+                  background scheduler when enabled and runs the Phase 12
+                  production-safety check
     deps.py        get_current_user / require_roles — JWT auth + RBAC dependencies
     middleware.py   request-id + structured access-log line per request (section 12)
   data/
@@ -150,6 +158,10 @@ app/
     drift_metrics.py             PSI, Jensen-Shannon divergence, z-score — pure
                                  functions shared by drift_detection.py and
                                  ood_detection.py
+    conformal.py                  split-conformal prediction (section 44): regression
+                                 intervals + classification prediction sets, both
+                                 with a finite-sample-correct quantile and an
+                                 empirical-coverage check
   services/
     identifiers.py             canonical "<provider>:<native_id>" ID scheme
     enum_utils.py               defensive provider-string -> enum parsing
@@ -175,6 +187,10 @@ app/
                                  shared source of out-of-sample predictions for both of the below
     ensemble.py                  learns ModelWeight per competition from backtest results (section 34)
     calibration.py               isotonic/Platt/beta calibration of P(home win) (section 37)
+    conformal_calibration.py     distribution-free interval/set calibration from the same
+                                 pooled walk-forward predictions (section 44)
+    simulation.py                 Monte Carlo season simulation: title/top-N/relegation
+                                 probabilities from many simulated season completions (section 42)
     forecast_service.py         quality gate -> ensemble score matrix -> prediction registry (section 61)
     drift_detection.py           model/data drift checks (section 42) persisted as ModelMonitoring rows
     ood_detection.py             per-forecast out-of-distribution flags that widen uncertainty (section 40)
@@ -198,7 +214,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   forecast service, full-sync orchestration, drift metrics,
                   drift detection, OOD detection, auth service, API auth/RBAC,
                   champion/challenger gate, rate limiter, API hardening,
-                  DB constraints)
+                  conformal prediction, conformal calibration, Monte Carlo
+                  simulation, simulation/conformal API, DB constraints)
 
 .github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
                                every push/PR to main (Phase 12)
@@ -213,8 +230,10 @@ owning phase lands: `competitions`, `seasons`, `teams`, `team_aliases`,
 `team_strength`, `model_versions`, `model_weights`, `predictions`,
 `prediction_snapshots`, `calibration_results`, `data_quality`,
 `provider_records`, `scenario_predictions`, `model_monitoring`,
-`audit_logs`, `system_events`, `users`. Works against SQLite (local/dev,
-the default) or PostgreSQL (production) purely by swapping `DATABASE_URL`.
+`audit_logs`, `system_events`, `users`, `conformal_calibrations`,
+`simulation_runs`, `simulation_standing_results`. Works against SQLite
+(local/dev, the default) or PostgreSQL (production) purely by swapping
+`DATABASE_URL`.
 
 Every ingested record carries provenance (`source_provider`,
 `source_record_id`, `retrieved_at`, `data_version`, `validation_status`) so
@@ -738,6 +757,91 @@ still promoted immediately on every retrain.
    read from an environment variable; injecting it securely is a
    deployment-platform concern, not something this codebase does for you).
 
+### Monte Carlo season simulation and conformal uncertainty (Phase 13)
+
+Two independent additions beyond the original 12-phase plan, picked from a
+gap analysis against a much larger follow-on specification. Both build
+directly on infrastructure already in place (the score matrix,
+`ModelVersion.parameters`, and Phase 7's walk-forward backtesting) rather
+than introducing a parallel modelling path.
+
+**Monte Carlo season simulation** — the analytic score matrix
+(`score_matrix.py`) answers "what's the probability distribution for one
+match"; it has no way to answer "what's the probability this team wins the
+league," since that depends on compounding uncertainty across every
+fixture still to be played.
+
+1. `app/services/simulation.py::SeasonSimulationService` simulates the rest
+   of a season many times. Critically, each remaining fixture's outcome is
+   sampled from the *exact same* normalized score matrix `POST /forecast`
+   would publish for it (`build_score_matrix`, reused unchanged) — so the
+   simulation is provably consistent with the single-match forecasts
+   already published, never a separately re-derived model.
+2. Every run is deterministic given its `random_seed`; when none is
+   supplied, one is generated and always recorded (never silently
+   unreproducible). The run also records the exact model version,
+   feature/software version, and a snapshot of every team's points/goal
+   difference *before* simulation — full provenance on an analytical
+   output, the same standard the rest of this project holds itself to.
+3. Output is a per-team standings table: mean points, mean finishing
+   position, a full position-probability distribution, and title /
+   top-N (`simulation_top_n_spots`) / relegation
+   (`simulation_relegation_spots`) probabilities. `n_simulations` is
+   bounded by `simulation_max_n` to keep a single request's cost bounded.
+   A fixture between two teams the champion model has never seen is
+   skipped and counted in `n_unscoreable_fixtures` rather than crashing
+   the whole run.
+4. API: `POST /simulations` (runs a new simulation), `GET
+   /simulations/{scenario_id}` and `GET /simulations` (retrieve past runs
+   — every run is persisted, never thrown away after computing it once).
+5. **What this doesn't do**: tiebreaks are points → goal difference → a
+   random draw — real competitions sometimes use head-to-head record or
+   other rules this doesn't model. It also doesn't weight by
+   competition format (round-robin vs. cup), so running it against a
+   knockout competition's "standings" is mathematically fine but not a
+   meaningful question to ask.
+
+**Conformal (distribution-free) uncertainty** — existing uncertainty
+(`aleatoric_uncertainty`/`epistemic_uncertainty`) is derived *from* the
+Poisson/Dixon-Coles model; conformal prediction instead asks "how wrong has
+this model actually been, out of sample," making no assumption about the
+underlying distribution's shape.
+
+1. `app/evaluation/conformal.py` implements split conformal prediction: a
+   regression interval (absolute-residual quantile) for goal counts, and a
+   classification prediction *set* for the 1X2 outcome (the "least
+   ambiguous set" method — Sadinle, Lei & Wasserman 2019), both using the
+   finite-sample-correct `ceil((n+1)(1-alpha))/n` quantile rather than a
+   naive percentile.
+2. `app/services/conformal_calibration.py::ConformalCalibrationService`
+   calibrates both from the champion `dixon_coles` model's pooled
+   walk-forward out-of-sample predictions (the same Phase 7 infrastructure
+   `calibration.py` and `ensemble.py` already consume) — split
+   chronologically into a calibration fold and a disjoint, later test
+   fold, never a random split, to keep faith with the project's "no future
+   information" rule. Calibrated against the anchor `dixon_coles` model
+   specifically, not the published ensemble blend — the same simplification
+   `forecast_service.py`'s own quality gate already documents; calibrating
+   directly against the ensemble's pooled predictions is a natural
+   follow-up, not something this phase needed to do. Skipped entirely
+   (never defaulted to a fabricated interval) below
+   `conformal_min_predictions` out-of-sample predictions.
+3. Every forecast's `conformal` field (`POST /forecast`, `GET
+   /predictions/{fixture}`) carries home/away/total-goals intervals
+   centered on the published point estimate, plus the outcome prediction
+   set — and each interval's `empirical_coverage`, the coverage *actually
+   measured* on the held-out test fold at calibration time, never a bare
+   claim that `target_coverage` (`conformal_alpha`) is automatically
+   achieved going forward. Diagnostics alone are also queryable via `GET
+   /conformal`, mirroring `/calibration`.
+4. **What this doesn't do**: split conformal's coverage guarantee relies on
+   exchangeability between the calibration and test folds, which a
+   chronological split only approximately satisfies (a regime change
+   between the two folds — see Phase 9's drift detection — would break
+   it); and, per the method's own definition, a prediction *set* can
+   legitimately contain more than one outcome, or in rare cases be empty —
+   neither is a bug.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -752,6 +856,7 @@ still promoted immediately on every retrain.
 10. **Administrator dashboard (API) + authentication/RBAC** — done
 11. **Champion/challenger deployment + rollback** — done
 12. **Testing hardening + production deployment** — done
+13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 
 ## Safety & integrity
 

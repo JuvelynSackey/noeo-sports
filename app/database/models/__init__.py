@@ -3,7 +3,7 @@ from app.database.models.audit import AuditLog, User  # noqa: F401
 from app.database.models.competitions import Competition, Season  # noqa: F401
 from app.database.models.fixtures import Fixture, MatchStatistic, Result, XGData  # noqa: F401
 from app.database.models.league import LeagueParameter, TeamStrength  # noqa: F401
-from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight  # noqa: F401
+from app.database.models.modeling import CalibrationResult, ConformalCalibration, ModelVersion, ModelWeight  # noqa: F401
 from app.database.models.monitoring import ModelMonitoring, SystemEvent  # noqa: F401
 from app.database.models.predictions import (  # noqa: F401
     Prediction,
@@ -11,4 +11,5 @@ from app.database.models.predictions import (  # noqa: F401
     ScenarioPrediction,
 )
 from app.database.models.quality import DataQuality, ProviderRecord  # noqa: F401
+from app.database.models.simulation import SimulationRun, SimulationStandingResult  # noqa: F401
 from app.database.models.teams import Team, TeamAlias  # noqa: F401

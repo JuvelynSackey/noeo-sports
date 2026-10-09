@@ -34,6 +34,9 @@ from app.api.schemas import (
     CalibrationOut,
     CompetitionDetailOut,
     CompetitionOut,
+    ConformalCalibrationOut,
+    ConformalIntervalOut,
+    ConformalOut,
     DataQualityOut,
     DiscoveryReportOut,
     ExpectedGoalsOut,
@@ -52,6 +55,8 @@ from app.api.schemas import (
     OutcomeDistributionOut,
     RateMarketForecastOut,
     ScorelineOut,
+    SimulationRunOut,
+    SimulationStandingOut,
     SyncReportOut,
     SystemHealthOut,
     TeamOut,
@@ -69,10 +74,11 @@ from app.database.models.competitions import Competition, Season
 from app.database.models.enums import CompetitionStatus, ModelStatus, UserRole
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
-from app.database.models.modeling import CalibrationResult, ModelVersion, ModelWeight
+from app.database.models.modeling import CalibrationResult, ConformalCalibration, ModelVersion, ModelWeight
 from app.database.models.monitoring import ModelMonitoring
 from app.database.models.predictions import Prediction
 from app.database.models.quality import DataQuality
+from app.database.models.simulation import SimulationRun, SimulationStandingResult
 from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
 from app.logging_config import configure_logging, get_logger
@@ -82,6 +88,7 @@ from app.services.auth import authenticate_user, create_access_token, hash_passw
 from app.services.forecast_service import ForecastService
 from app.services.rate_limiter import RateLimiter
 from app.services.scheduler import JOB_ID, create_scheduler
+from app.services.simulation import SeasonSimulationService
 from app.services.sync_orchestrator import FullSyncService
 
 configure_logging()  # app/logging_config.py's structured JSON setup — every other
@@ -735,6 +742,46 @@ def calibration(
     return out
 
 
+@app.get("/conformal", response_model=list[ConformalCalibrationOut])
+def conformal_calibration(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    target: str | None = Query(default=None, description="home_goals | away_goals | total_goals | outcome"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[ConformalCalibrationOut]:
+    """Distribution-free (conformal) uncertainty calibration (section 44) —
+    the calibrated interval half-width/threshold and its measured
+    out-of-sample empirical coverage, one row per target."""
+    query = (
+        db.query(ConformalCalibration, ModelVersion, Competition.canonical_competition_id)
+        .join(ModelVersion, ConformalCalibration.model_version_id == ModelVersion.id)
+        .join(Competition, ConformalCalibration.competition_id == Competition.id)
+    )
+    if competition:
+        query = query.filter(Competition.canonical_competition_id == competition)
+    if target:
+        query = query.filter(ConformalCalibration.target == target)
+
+    out = []
+    for record, mv, comp_canonical in query.all():
+        out.append(
+            ConformalCalibrationOut(
+                competition_canonical_id=comp_canonical,
+                model_name=mv.model_name,
+                model_version=mv.version,
+                target=record.target,
+                method=record.method,
+                alpha=record.alpha,
+                quantile=record.quantile,
+                n_calibration=record.n_calibration,
+                n_test=record.n_test,
+                empirical_coverage=record.empirical_coverage,
+                evaluated_at=record.evaluated_at,
+            )
+        )
+    return out
+
+
 def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecastOut:
     fixture = db.get(Fixture, prediction.fixture_id)
     competition = db.get(Competition, fixture.competition_id)
@@ -776,6 +823,17 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
     calibration_out = CalibrationDiagnosticOut(**calibration_diag) if calibration_diag else None
     ood_flags = validation.get("ood_flags") or []
 
+    conformal_diag = validation.get("conformal")
+    conformal_out = None
+    if conformal_diag:
+        conformal_out = ConformalOut(
+            home_goals=ConformalIntervalOut(**conformal_diag["home_goals"]) if conformal_diag.get("home_goals") else None,
+            away_goals=ConformalIntervalOut(**conformal_diag["away_goals"]) if conformal_diag.get("away_goals") else None,
+            total_goals=ConformalIntervalOut(**conformal_diag["total_goals"]) if conformal_diag.get("total_goals") else None,
+            outcome_prediction_set=conformal_diag.get("outcome_prediction_set") or [],
+            outcome_target_coverage=conformal_diag.get("outcome_target_coverage"),
+        )
+
     supplementary = prediction.supplementary_markets or {}
 
     first_half_out = None
@@ -814,6 +872,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
         first_half=first_half_out,
         corners=corners_out,
         cards=cards_out,
+        conformal=conformal_out,
         model_diagnostics=ModelDiagnosticsOut(
             model_disagreement=prediction.model_disagreement_level.value
             if hasattr(prediction.model_disagreement_level, "value")
@@ -907,6 +966,102 @@ def get_prediction_distribution(
         "score_matrix": latest.score_matrix,
         "goal_distribution": latest.goal_distribution,
     }
+
+
+def _to_simulation_run_out(db: Session, run: SimulationRun) -> SimulationRunOut:
+    competition = db.get(Competition, run.competition_id)
+    season = db.get(Season, run.season_id)
+    model_version = db.get(ModelVersion, run.model_version_id)
+    rows = (
+        db.query(SimulationStandingResult, Team.canonical_team_id)
+        .join(Team, SimulationStandingResult.team_id == Team.id)
+        .filter(SimulationStandingResult.simulation_run_id == run.id)
+        .order_by(SimulationStandingResult.mean_position)
+        .all()
+    )
+    return SimulationRunOut(
+        scenario_id=run.scenario_id,
+        competition_canonical_id=competition.canonical_competition_id,
+        season_canonical_id=season.canonical_season_id,
+        model_version=model_version.version,
+        n_simulations=run.n_simulations,
+        random_seed=run.random_seed,
+        feature_version=run.feature_version,
+        software_version=run.software_version,
+        n_remaining_fixtures=run.n_remaining_fixtures,
+        n_unscoreable_fixtures=run.n_unscoreable_fixtures,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        standings=[
+            SimulationStandingOut(
+                team_canonical_id=team_canonical_id,
+                mean_points=s.mean_points,
+                mean_position=s.mean_position,
+                position_probabilities=s.position_probabilities,
+                title_probability=s.title_probability,
+                top_n_probability=s.top_n_probability,
+                relegation_probability=s.relegation_probability,
+            )
+            for s, team_canonical_id in rows
+        ],
+    )
+
+
+@app.post("/simulations", response_model=SimulationRunOut)
+def run_simulation(
+    competition: str = Query(..., description="canonical_competition_id"),
+    season: str | None = Query(default=None, description="canonical_season_id; defaults to the current ACTIVE season"),
+    n_simulations: int | None = Query(default=None, description=f"defaults to settings.simulation_default_n, capped at simulation_max_n"),
+    random_seed: int | None = Query(default=None, description="omit to get a fresh, recorded seed"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> SimulationRunOut:
+    """Monte Carlo season simulation (section 42) — aggregates title/top-N/
+    relegation probabilities across many simulated completions of the
+    season, sampling every remaining fixture from the same score matrix
+    `/forecast` would publish for it. Never a single sampled outcome."""
+    comp = db.query(Competition).filter_by(canonical_competition_id=competition).first()
+    if comp is None:
+        raise HTTPException(status_code=404, detail="Competition not found")
+
+    season_row = None
+    if season:
+        season_row = db.query(Season).filter_by(competition_id=comp.id, canonical_season_id=season).first()
+        if season_row is None:
+            raise HTTPException(status_code=404, detail="Season not found")
+
+    report = SeasonSimulationService(db).simulate(comp, season_row, n_simulations, random_seed)
+    if not report.completed:
+        raise HTTPException(status_code=422, detail=report.skipped_reason)
+
+    run = db.query(SimulationRun).filter_by(scenario_id=report.scenario_id).one()
+    return _to_simulation_run_out(db, run)
+
+
+@app.get("/simulations/{scenario_id}", response_model=SimulationRunOut)
+def get_simulation(
+    scenario_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> SimulationRunOut:
+    run = db.query(SimulationRun).filter_by(scenario_id=scenario_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Simulation run not found")
+    return _to_simulation_run_out(db, run)
+
+
+@app.get("/simulations", response_model=list[SimulationRunOut])
+def list_simulations(
+    competition: str | None = Query(default=None, description="canonical_competition_id"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[SimulationRunOut]:
+    query = db.query(SimulationRun)
+    if competition:
+        comp = db.query(Competition).filter_by(canonical_competition_id=competition).first()
+        if comp is None:
+            raise HTTPException(status_code=404, detail="Competition not found")
+        query = query.filter(SimulationRun.competition_id == comp.id)
+    runs = query.order_by(SimulationRun.started_at.desc()).limit(50).all()
+    return [_to_simulation_run_out(db, run) for run in runs]
 
 
 @app.post("/sync", response_model=SyncReportOut)

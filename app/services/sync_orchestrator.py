@@ -26,6 +26,7 @@ from app.logging_config import get_logger
 from app.services.backtesting import BacktestingService
 from app.services.calibration import CalibrationTrainingReport, CalibrationService
 from app.services.competition_discovery import CompetitionDiscoveryReport, CompetitionDiscoveryService
+from app.services.conformal_calibration import ConformalCalibrationService, ConformalTrainingReport
 from app.services.data_quality import DataQualityService
 from app.services.drift_detection import DriftDetectionService, DriftReport
 from app.services.ensemble import EnsembleService, EnsembleTrainingReport
@@ -70,6 +71,7 @@ class FullSyncReport:
     model_training: dict[str, ModelTrainingReport] = field(default_factory=dict)
     ensemble_training: dict[str, EnsembleTrainingReport] = field(default_factory=dict)
     calibration_training: dict[str, CalibrationTrainingReport] = field(default_factory=dict)
+    conformal_training: dict[str, ConformalTrainingReport] = field(default_factory=dict)
     drift: dict[str, DriftReport] = field(default_factory=dict)
     champion_challenger_decisions: list[str] = field(default_factory=list)
     models_activated: list[str] = field(default_factory=list)
@@ -201,6 +203,9 @@ class FullSyncService:
             competition, backtest_reports
         )
         report.calibration_training[competition.canonical_competition_id] = CalibrationService(self.db).train(
+            competition, backtest_reports
+        )
+        report.conformal_training[competition.canonical_competition_id] = ConformalCalibrationService(self.db).train(
             competition, backtest_reports
         )
 

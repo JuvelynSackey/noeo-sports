@@ -275,6 +275,26 @@ class CalibrationOut(BaseModel):
     evaluated_at: dt.datetime
 
 
+class ConformalCalibrationOut(BaseModel):
+    """Distribution-free calibration diagnostics (section 44) — the
+    `GET /conformal` counterpart to `/calibration`, one row per target
+    (home_goals/away_goals/total_goals/outcome)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    competition_canonical_id: str
+    model_name: str
+    model_version: str
+    target: str
+    method: str
+    alpha: float
+    quantile: float
+    n_calibration: int
+    n_test: int
+    empirical_coverage: float | None
+    evaluated_at: dt.datetime
+
+
 class ScorelineOut(BaseModel):
     home_goals: int
     away_goals: int
@@ -357,6 +377,28 @@ class RateMarketForecastOut(BaseModel):
     expected_total: float
 
 
+class ConformalIntervalOut(BaseModel):
+    """A distribution-free prediction interval (section 44) — calibrated
+    from the champion model's own out-of-sample residuals, not assumed from
+    the Poisson/Dixon-Coles shape. `empirical_coverage` is what was actually
+    measured on a held-out test fold at calibration time, never a claim that
+    `target_coverage` is automatically achieved going forward."""
+
+    point_estimate: float
+    lower: float
+    upper: float
+    target_coverage: float
+    empirical_coverage: float | None
+
+
+class ConformalOut(BaseModel):
+    home_goals: ConformalIntervalOut | None = None
+    away_goals: ConformalIntervalOut | None = None
+    total_goals: ConformalIntervalOut | None = None
+    outcome_prediction_set: list[str] = []
+    outcome_target_coverage: float | None = None
+
+
 class MatchForecastOut(BaseModel):
     """MASTER BUILD PROMPT section 62 output format. `most_probable_scorelines`
     are exactly that — a summary of the score matrix, never a guarantee."""
@@ -376,6 +418,7 @@ class MatchForecastOut(BaseModel):
     first_half: FirstHalfForecastOut | None
     corners: RateMarketForecastOut | None
     cards: RateMarketForecastOut | None
+    conformal: ConformalOut | None = None
     model_diagnostics: ModelDiagnosticsOut
     model_information: ModelInformationOut
     administrator_notes: AdministratorNotesOut
@@ -421,3 +464,33 @@ class AuditLogOut(BaseModel):
     resource_id: str | None
     details: dict | None
     occurred_at: dt.datetime
+
+
+class SimulationStandingOut(BaseModel):
+    team_canonical_id: str
+    mean_points: float
+    mean_position: float
+    position_probabilities: dict[str, float]
+    title_probability: float
+    top_n_probability: float
+    relegation_probability: float
+
+
+class SimulationRunOut(BaseModel):
+    """Monte Carlo season simulation (section 42) — every field here is
+    recorded provenance (seed, model version, feature/software version),
+    not just the result, so the run is reproducible and auditable."""
+
+    scenario_id: str
+    competition_canonical_id: str
+    season_canonical_id: str
+    model_version: str
+    n_simulations: int
+    random_seed: int
+    feature_version: str
+    software_version: str
+    n_remaining_fixtures: int
+    n_unscoreable_fixtures: int
+    started_at: dt.datetime
+    completed_at: dt.datetime | None
+    standings: list[SimulationStandingOut]
