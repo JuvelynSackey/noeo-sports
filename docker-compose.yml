@@ -15,15 +15,33 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   app:
     build: .
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg://football:football@db:5432/football_prediction
       DATA_PROVIDER: mock
       LOG_LEVEL: INFO
+      # Enables the cache (section 22) and the in-process async job-queue
+      # worker (section 74) started from app/api/main.py's lifespan — see
+      # the README's Phase 15 section for why this container runs its own
+      # worker rather than a separate one, and when that stops being
+      # appropriate.
+      REDIS_URL: redis://redis:6379/0
       # This compose file is a local/demo setup (hardcoded DB credentials,
       # mock provider) — ENVIRONMENT stays "development" so the startup
       # safety check in app/api/main.py doesn't refuse to boot over the

@@ -3,7 +3,12 @@
 # in-process state, so this image is not meant to be scaled by adding
 # uvicorn/gunicorn workers within one container — scale by running multiple
 # container replicas instead, with SCHEDULER_ENABLED=true on at most one of
-# them (see the README's Production deployment section for why).
+# them (see the README's Production deployment section for why). The async
+# job-queue worker (settings.redis_url, section 74) is the one piece of
+# in-process background state that's actually fine to run on every
+# replica: BRPOP against the shared Redis queue is a standard competing-
+# consumers pattern, so N containers just means N workers pulling from the
+# same queue, not N independent schedulers doing the same work N times.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

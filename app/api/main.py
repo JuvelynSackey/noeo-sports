@@ -14,6 +14,7 @@ require the ADMIN or ANALYST role via `require_roles` — see `app/api/deps.py`.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -43,6 +44,7 @@ from app.api.schemas import (
     FirstHalfForecastOut,
     FixtureOut,
     GoalDistributionOut,
+    JobOut,
     LeagueParameterOut,
     MatchForecastOut,
     ModelDiagnosticsOut,
@@ -87,7 +89,10 @@ from app.logging_config import configure_logging, get_logger
 from app.services import model_version_registry
 from app.services.audit import record_audit
 from app.services.auth import authenticate_user, create_access_token, hash_password
+from app.services.cache import get_cache
 from app.services.forecast_service import ForecastService
+from app.services.job_handlers import run_full_sync_job, run_season_simulation_job
+from app.services.job_queue import JobQueueService
 from app.services.rate_limiter import RateLimiter
 from app.services.scenario_engine import ScenarioAssumptions, ScenarioEngine, ScenarioValidationError
 from app.services.scheduler import JOB_ID, create_scheduler
@@ -103,6 +108,9 @@ _ADMIN_OR_ANALYST = require_roles(UserRole.ADMIN, UserRole.ANALYST)
 
 _scheduler = None  # set by lifespan when settings.scheduler_enabled; read by /system-health
 _login_limiter: RateLimiter | None = None  # set by lifespan from settings; see rate_limiter.py
+_job_queue: JobQueueService | None = None  # set by lifespan when settings.redis_url is configured
+_job_worker_task: asyncio.Task | None = None
+_job_worker_stop: asyncio.Event | None = None
 
 
 def _check_production_safety(settings) -> None:
@@ -126,17 +134,32 @@ def _check_production_safety(settings) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _scheduler, _login_limiter
+    global _scheduler, _login_limiter, _job_queue, _job_worker_task, _job_worker_stop
     settings = get_settings()
     _check_production_safety(settings)
     _login_limiter = RateLimiter(settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds)
     if settings.scheduler_enabled:
         _scheduler = create_scheduler(settings)
         _scheduler.start()
+
+    _job_queue = JobQueueService(
+        settings, handlers={"full_sync": run_full_sync_job, "season_simulation": run_season_simulation_job}
+    )
+    if _job_queue.enabled:
+        _job_worker_stop = asyncio.Event()
+        _job_worker_task = asyncio.create_task(_job_queue.run_forever(_job_worker_stop))
+
     yield
+
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+    if _job_worker_task is not None:
+        _job_worker_stop.set()
+        await _job_worker_task
+        _job_worker_task = None
+        _job_worker_stop = None
+    _job_queue = None
     _login_limiter = None
 
 
@@ -296,8 +319,20 @@ def audit_logs(
 
 
 @app.get("/competitions", response_model=list[CompetitionOut])
-def list_competitions(db: Session = Depends(get_db), user: User = Depends(get_current_user)) -> list[Competition]:
-    return db.query(Competition).order_by(Competition.name).all()
+def list_competitions(
+    db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> list[Competition] | list[dict]:
+    """Cached (section 22) — competitions change rarely and are read on
+    nearly every request path, a natural fit. Invalidated the moment a
+    sync could have added or changed one, never left to expire stale."""
+    cache = get_cache()
+    cached = cache.get_json("cache:competitions")
+    if cached is not None:
+        return cached
+    rows = db.query(Competition).order_by(Competition.name).all()
+    result = [CompetitionOut.model_validate(r).model_dump(mode="json") for r in rows]
+    cache.set_json("cache:competitions", result, ttl_seconds=get_settings().cache_default_ttl_seconds)
+    return result
 
 
 @app.get("/competitions/{canonical_competition_id}", response_model=CompetitionDetailOut)
@@ -927,15 +962,24 @@ def forecast(
         .order_by(Prediction.predicted_at.desc())
         .first()
     )
+    get_cache().delete(f"cache:predictions:{fixture}")
     return _to_match_forecast_out(db, latest)
 
 
 @app.get("/predictions/{canonical_fixture_id}", response_model=MatchForecastOut)
 def get_prediction(
     canonical_fixture_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
-) -> MatchForecastOut:
+) -> MatchForecastOut | dict:
     """Returns the most recent registered prediction for a fixture without
-    generating a new one — use POST /forecast to (re)generate."""
+    generating a new one — use POST /forecast to (re)generate. Cached
+    (section 22: "recent forecasts"); invalidated by POST /forecast for
+    this specific fixture, not left to expire stale."""
+    cache = get_cache()
+    cache_key = f"cache:predictions:{canonical_fixture_id}"
+    cached = cache.get_json(cache_key)
+    if cached is not None:
+        return cached
+
     fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
     if fixture_row is None:
         raise HTTPException(status_code=404, detail="Fixture not found")
@@ -947,7 +991,9 @@ def get_prediction(
     )
     if latest is None:
         raise HTTPException(status_code=404, detail="No prediction registered for this fixture yet")
-    return _to_match_forecast_out(db, latest)
+    result = _to_match_forecast_out(db, latest)
+    cache.set_json(cache_key, result.model_dump(mode="json"), ttl_seconds=get_settings().cache_default_ttl_seconds)
+    return result
 
 
 @app.get("/predictions/{canonical_fixture_id}/distribution")
@@ -1152,6 +1198,7 @@ def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> S
             close()
     record_audit(db, actor, "TRIGGER_FULL_SYNC", resource_type="sync", details={"provider": report.provider, "system_status": report.system_status})
     db.commit()
+    get_cache().delete("cache:competitions")
     return SyncReportOut(
         provider=report.provider,
         started_at=report.started_at,
@@ -1174,3 +1221,63 @@ def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> S
         system_status=report.system_status,
         errors=report.errors,
     )
+
+
+def _job_unavailable() -> HTTPException:
+    return HTTPException(status_code=503, detail="job queue unavailable (REDIS_URL is not configured)")
+
+
+@app.post("/sync/async", response_model=JobOut, status_code=202)
+def sync_async(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> JobOut:
+    """Enqueues a full sync (section 74) instead of running it in-request —
+    ADMIN only, same as POST /sync, and audit-logged the same way. Poll
+    GET /jobs/{job_id} for the result; the job itself is exactly
+    FullSyncService.run(), unchanged."""
+    if _job_queue is None or not _job_queue.enabled:
+        raise _job_unavailable()
+    job_id = _job_queue.enqueue("full_sync", {})
+    record_audit(db, actor, "TRIGGER_FULL_SYNC_ASYNC", resource_type="job", resource_id=job_id)
+    db.commit()
+    return JobOut(**_job_queue.get_status(job_id))
+
+
+@app.post("/simulations/async", response_model=JobOut, status_code=202)
+def simulate_async(
+    competition: str = Query(..., description="canonical_competition_id"),
+    season: str | None = Query(default=None, description="canonical_season_id; defaults to the current ACTIVE season"),
+    n_simulations: int | None = Query(default=None),
+    random_seed: int | None = Query(default=None),
+    user: User = Depends(get_current_user),
+) -> JobOut:
+    """Enqueues a Monte Carlo season simulation instead of running it
+    in-request. Poll GET /jobs/{job_id} for the result (a scenario_id to
+    then fetch via GET /simulations/{scenario_id})."""
+    if _job_queue is None or not _job_queue.enabled:
+        raise _job_unavailable()
+    job_id = _job_queue.enqueue(
+        "season_simulation",
+        {"competition": competition, "season": season, "n_simulations": n_simulations, "random_seed": random_seed},
+    )
+    return JobOut(**_job_queue.get_status(job_id))
+
+
+@app.get("/jobs/dead-letter", response_model=list[JobOut])
+def list_dead_letter_jobs(user: User = Depends(_ADMIN_ONLY)) -> list[JobOut]:
+    """Every job that exhausted its retries (section 74's dead-letter
+    handling requirement) — ADMIN only, operational visibility into
+    background-job failures. Registered before GET /jobs/{job_id} so
+    "dead-letter" is never matched as a job_id."""
+    if _job_queue is None or not _job_queue.enabled:
+        raise _job_unavailable()
+    statuses = [_job_queue.get_status(job_id) for job_id in _job_queue.list_dead_letter()]
+    return [JobOut(**s) for s in statuses if s is not None]
+
+
+@app.get("/jobs/{job_id}", response_model=JobOut)
+def get_job(job_id: str, user: User = Depends(get_current_user)) -> JobOut:
+    if _job_queue is None or not _job_queue.enabled:
+        raise _job_unavailable()
+    status = _job_queue.get_status(job_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return JobOut(**status)

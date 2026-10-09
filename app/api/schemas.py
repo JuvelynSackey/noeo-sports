@@ -522,3 +522,20 @@ class ScenarioOut(BaseModel):
     difference: dict
     requested_by: str | None
     created_at: dt.datetime
+
+
+class JobOut(BaseModel):
+    """A background job's status (section 74) — PENDING/RUNNING/SUCCEEDED/
+    FAILED, with `attempts` and, on failure, `error` making a retry or a
+    dead-lettered job's history actually inspectable rather than silent."""
+
+    job_id: str
+    job_type: str
+    status: str
+    attempts: int
+    max_retries: int
+    result: dict | None = None
+    error: str | None = None
+    created_at: dt.datetime
+    started_at: dt.datetime | None = None
+    finished_at: dt.datetime | None = None

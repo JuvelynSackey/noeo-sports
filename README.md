@@ -32,6 +32,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 12 — Testing hardening and production deployment.**
 - **Phase 13 — Monte Carlo season simulation and conformal uncertainty.**
 - **Phase 14 — Scenario engine and shock detection.**
+- **Phase 15 — Redis cache and local async job queue.**
 
 Every phase in the original 12-phase roadmap has an initial implementation.
 That means "feature-complete against the 12-phase plan," not
@@ -39,7 +40,7 @@ That means "feature-complete against the 12-phase plan," not
 deployment** section below for what Phase 12 actually covers and, just as
 importantly, what it explicitly does not (load testing, a live run against
 a real provider over time, multi-instance scaling of the scheduler). Phases
-13 and 14 extend the platform beyond that original 12-phase plan, picked
+13-15 extend the platform beyond that original 12-phase plan, picked
 one at a time from a gap analysis against a larger follow-on
 specification — see their own sections below for scope and what's
 deliberately still out of scope in each. Note on scope: "administrator
@@ -91,15 +92,28 @@ Set `SCHEDULER_ENABLED=true` in `.env` to have the API process run the full
 pipeline automatically every `FULL_SYNC_INTERVAL_HOURS` in the background,
 in addition to (not instead of) `POST /sync` on demand.
 
+Set `REDIS_URL` (e.g. `redis://localhost:6379/0`, or just use `docker
+compose up` — see below) to enable the cache and the async job queue:
+
+```bash
+# then, with REDIS_URL set:
+#       POST http://127.0.0.1:8000/sync/async       -> {"job_id": "...", "status": "PENDING"}
+#       POST http://127.0.0.1:8000/simulations/async?competition=mock:MOCK-D1
+#       GET  http://127.0.0.1:8000/jobs/<job_id>     -> poll for SUCCEEDED/FAILED + result/error
+#       GET  http://127.0.0.1:8000/jobs/dead-letter  -> jobs that exhausted their retries (ADMIN)
+```
+
 Run tests:
 
 ```bash
 pytest -q
 ```
 
-Run with Docker (Postgres + app; both containers have a healthcheck against
-`/system-health`, and the app runs as a non-root user — see **Testing
-hardening and production deployment** below):
+Run with Docker (Postgres + Redis + app; every container has a
+healthcheck, and the app runs as a non-root user — see **Testing
+hardening and production deployment** below). `REDIS_URL` is set
+automatically in this compose file, so the cache and async job queue are
+live out of the box:
 
 ```bash
 docker compose up --build
@@ -138,9 +152,10 @@ app/
                   teams, fixtures, data-quality, models (+ rollback),
                   model-performance, backtests, calibration, conformal,
                   league-parameters, team-strength, forecast/predictions,
-                  scenarios, simulations, sync, monitoring); its lifespan
-                  starts the background scheduler when enabled and runs the
-                  Phase 12 production-safety check
+                  scenarios, simulations, sync, monitoring, jobs); its
+                  lifespan starts the background scheduler when enabled,
+                  the async job-queue worker when REDIS_URL is set, and
+                  runs the Phase 12 production-safety check
     deps.py        get_current_user / require_roles — JWT auth + RBAC dependencies
     middleware.py   request-id + structured access-log line per request (section 12)
   data/
@@ -212,6 +227,13 @@ app/
     auth.py                     password hashing (bcrypt) + JWT issuance/verification (section 54)
     audit.py                     append-only AuditLog writer for sensitive administrative actions
     rate_limiter.py              in-memory sliding-window limiter behind POST /auth/token
+    cache.py                     Redis-backed cache (section 22 of the follow-on spec) — a
+                                 no-op when REDIS_URL isn't set, never the source of truth
+    job_queue.py                  local async job queue (section 74): Redis LPUSH/BRPOP, with
+                                 idempotency, retries, dead-letter handling and status/result
+                                 tracking, run as an in-process background worker
+    job_handlers.py               the actual job bodies — each just opens its own DB session
+                                 and calls an existing, already-tested service
   config.py       Pydantic settings, all sourced from env/.env — nothing hard-coded
   logging_config.py  Structured (JSON) logging setup
 
@@ -228,7 +250,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   champion/challenger gate, rate limiter, API hardening,
                   conformal prediction, conformal calibration, Monte Carlo
                   simulation, simulation/conformal API, shock detection,
-                  scenario engine, scenario/shock API, DB constraints)
+                  scenario engine, scenario/shock API, Redis cache, async
+                  job queue, job handlers, job/cache API, DB constraints)
 
 .github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
                                every push/PR to main (Phase 12)
@@ -924,6 +947,71 @@ competition for administrator review, not any individual forecast.
    fabricated) are all in the spec's own bullet list for this feature and
    none of them are detectable with what this project actually has.
 
+### Redis cache and local async job queue (Phase 15)
+
+The last item picked, so far, from the same gap analysis — specifically
+the one piece of infrastructure from that larger follow-on specification
+that's actually runnable and testable in this environment (no Kubernetes,
+CDN, or multi-region infrastructure here; see the gap analysis itself for
+why those stay out of scope). Both pieces are entirely optional: with
+`REDIS_URL` unset (the default), every endpoint that existed before this
+phase behaves exactly as it did before — caching degrades to "always
+recompute," and the three new endpoint families
+(`/sync/async`, `/simulations/async`, `/jobs/*`) return a `503` rather
+than silently doing nothing.
+
+1. **Cache** (`app/services/cache.py`) — a thin Redis wrapper that's never
+   the source of truth: every cached value is a TTL'd
+   (`cache_default_ttl_seconds`) copy of something the database can
+   always recompute, and a Redis error degrades to "recompute," never to
+   a 500. Applied to `GET /competitions` and `GET
+   /predictions/{fixture}` as the two clearest examples from the spec's
+   own list ("frequently accessed... competition metadata," "recent
+   forecasts") — invalidated *immediately* on the event that could have
+   changed them (`POST /sync` clears the competitions cache; `POST
+   /forecast` clears that one fixture's prediction cache key), not left
+   to expire stale in the meantime, per the spec's own "cache
+   invalidation must be event-driven where practical."
+2. **Local async job queue** (`app/services/job_queue.py`) — Redis
+   LPUSH/BRPOP as the queue, built from first principles rather than
+   pulling in a task-queue framework, consistent with how the rest of
+   this project builds its core pieces. Supports the spec's explicit
+   requirements: **idempotency** (an `idempotency_key` returns the same
+   `job_id` while an earlier job with that key is still
+   pending/running), a **retry policy** (`job_max_retries` attempts
+   before giving up), **dead-letter handling** (`GET /jobs/dead-letter`,
+   ADMIN-only), and **progress/failure reporting** (`GET /jobs/{job_id}`
+   returns status, attempt count, and the result or error).
+3. **What runs through it today**: `POST /sync/async` (ADMIN, mirrors
+   `POST /sync`, audit-logged as `TRIGGER_FULL_SYNC_ASYNC`) and `POST
+   /simulations/async` (mirrors `POST /simulations`) — both existing
+   *synchronous* endpoints are untouched and still work exactly as
+   before; these are additive alternatives for a caller that would
+   rather poll than hold a request open. The job bodies themselves
+   (`app/services/job_handlers.py`) are thin wrappers around the exact
+   same `FullSyncService`/`SeasonSimulationService` the synchronous
+   endpoints call.
+4. **Runs in-process by default** — the worker is an `asyncio` task
+   started from `app/api/main.py`'s own lifespan (`JobQueueService.
+   run_forever`, with the blocking `BRPOP` moved off the event loop via
+   `asyncio.to_thread`), not a separate OS process, so local development
+   needs nothing beyond Redis itself. This is deliberately different
+   from the scheduler/rate-limiter's "single-process only" caveat
+   (Phase 12): `BRPOP` against a shared queue is a standard
+   competing-consumers pattern, so running this image as multiple
+   container replicas just means multiple workers pulling from the same
+   queue, not duplicated work — see the `Dockerfile`'s own note on this.
+   `docker-compose.yml` adds a `redis` service and sets `REDIS_URL`
+   automatically.
+5. **What this doesn't do**: there's no dedicated worker *process*
+   wired up separately from the API container (both run in the same
+   process here) — a natural follow-up once a specific job type's
+   resource needs (e.g. a large Monte Carlo run) justify scaling workers
+   independently from API capacity. Job records have no explicit
+   expiry/cleanup (Redis keys accumulate until manually cleared) —
+   fine for a demo or a moderate-volume deployment, not for one that
+   never restarts Redis and never prunes.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -940,6 +1028,7 @@ competition for administrator review, not any individual forecast.
 12. **Testing hardening + production deployment** — done
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
+15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
 
 ## Safety & integrity
 

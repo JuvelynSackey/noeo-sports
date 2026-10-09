@@ -169,6 +169,22 @@ class Settings(BaseSettings):
     shock_recent_match_window: int = 5
     shock_uncertainty_inflation_factor: float = 1.5
 
+    # Caching (section 22) — empty/unset disables caching entirely rather
+    # than erroring: every cached value is just a TTL'd copy of something
+    # the database can always recompute, never the source of truth, and a
+    # Redis outage must degrade to "always recompute," not a 500.
+    redis_url: str | None = None
+    cache_default_ttl_seconds: int = 60
+
+    # Local async job queue (section 74) — Redis-backed (LPUSH/BRPOP), run
+    # as an in-process background worker by default (see
+    # app/services/job_queue.py and the Phase 15 README section for the
+    # production-deployment implications of that choice) rather than a
+    # separate OS process, so local development needs nothing beyond Redis
+    # itself. Requires redis_url; the queue is simply unavailable without it.
+    job_max_retries: int = 2
+    job_worker_poll_timeout_seconds: float = 1.0
+
 
 @lru_cache
 def get_settings() -> Settings:
