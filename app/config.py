@@ -156,6 +156,19 @@ class Settings(BaseSettings):
     simulation_top_n_spots: int = 4
     simulation_relegation_spots: int = 3
 
+    # Scenario engine (section 59) — bounds how extreme a what-if delta may
+    # be, since attack/defence strength operate on a log-rate scale where
+    # large deltas blow up the resulting score matrix numerically.
+    scenario_max_abs_delta: float = 3.0
+
+    # Shock detection (section 60) — a soft, per-forecast signal (like OOD
+    # detection) that widens uncertainty rather than blocking a forecast:
+    # something changed abruptly right before this specific match.
+    shock_team_strength_zscore_threshold: float = 3.0
+    shock_scoring_pattern_zscore_threshold: float = 3.0
+    shock_recent_match_window: int = 5
+    shock_uncertainty_inflation_factor: float = 1.5
+
 
 @lru_cache
 def get_settings() -> Settings:

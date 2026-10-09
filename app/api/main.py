@@ -17,7 +17,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import func
@@ -54,6 +54,8 @@ from app.api.schemas import (
     MovementReportOut,
     OutcomeDistributionOut,
     RateMarketForecastOut,
+    ScenarioOut,
+    ScenarioRequestIn,
     ScorelineOut,
     SimulationRunOut,
     SimulationStandingOut,
@@ -76,7 +78,7 @@ from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import CalibrationResult, ConformalCalibration, ModelVersion, ModelWeight
 from app.database.models.monitoring import ModelMonitoring
-from app.database.models.predictions import Prediction
+from app.database.models.predictions import Prediction, ScenarioPrediction
 from app.database.models.quality import DataQuality
 from app.database.models.simulation import SimulationRun, SimulationStandingResult
 from app.database.models.teams import Team
@@ -87,6 +89,7 @@ from app.services.audit import record_audit
 from app.services.auth import authenticate_user, create_access_token, hash_password
 from app.services.forecast_service import ForecastService
 from app.services.rate_limiter import RateLimiter
+from app.services.scenario_engine import ScenarioAssumptions, ScenarioEngine, ScenarioValidationError
 from app.services.scheduler import JOB_ID, create_scheduler
 from app.services.simulation import SeasonSimulationService
 from app.services.sync_orchestrator import FullSyncService
@@ -822,6 +825,7 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
     calibration_diag = validation.get("calibration")
     calibration_out = CalibrationDiagnosticOut(**calibration_diag) if calibration_diag else None
     ood_flags = validation.get("ood_flags") or []
+    shock_flags = validation.get("shock_flags") or []
 
     conformal_diag = validation.get("conformal")
     conformal_out = None
@@ -882,6 +886,8 @@ def _to_match_forecast_out(db: Session, prediction: Prediction) -> MatchForecast
             data_quality_score=prediction.data_quality_score,
             ood_status=prediction.ood_status,
             ood_flags=ood_flags,
+            shock_status=bool(shock_flags),
+            shock_flags=shock_flags,
         ),
         model_information=ModelInformationOut(
             champion_model=champion_name,
@@ -966,6 +972,67 @@ def get_prediction_distribution(
         "score_matrix": latest.score_matrix,
         "goal_distribution": latest.goal_distribution,
     }
+
+
+def _to_scenario_out(db: Session, fixture_row: Fixture, row: ScenarioPrediction) -> ScenarioOut:
+    baseline = db.get(Prediction, row.baseline_prediction_id)
+    return ScenarioOut(
+        label="HYPOTHETICAL",
+        scenario_name=row.scenario_name,
+        fixture_canonical_id=fixture_row.canonical_fixture_id,
+        baseline_prediction_id=baseline.prediction_id if baseline else "unknown",
+        assumptions=row.assumptions,
+        scenario_result=row.scenario_result,
+        difference=row.difference,
+        requested_by=row.requested_by,
+        created_at=row.created_at,
+    )
+
+
+@app.post("/scenarios", response_model=ScenarioOut)
+def run_scenario(
+    fixture: str = Query(..., description="canonical_fixture_id"),
+    payload: ScenarioRequestIn = Body(...),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ScenarioOut:
+    """What-if analysis (section 59) — always labelled HYPOTHETICAL and
+    persisted alongside, never over, the fixture's official forecast.
+    Deltas are expressed against the baseline's own anchor model fit
+    (log-scale attack/defence strength, home advantage); see
+    app/services/scenario_engine.py for exactly what this can and can't
+    represent (e.g. a "missing player" is a user-supplied strength delta,
+    not derived from any real lineup/injury data this platform doesn't have)."""
+    fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=fixture).first()
+    if fixture_row is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+
+    assumptions = ScenarioAssumptions(
+        home_advantage_delta=payload.home_advantage_delta,
+        attack_delta=payload.attack_delta,
+        defence_delta=payload.defence_delta,
+    )
+    try:
+        record = ScenarioEngine(db).run(fixture_row, payload.scenario_name, assumptions, requested_by=user.email)
+    except ScenarioValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return _to_scenario_out(db, fixture_row, record)
+
+
+@app.get("/scenarios/{canonical_fixture_id}", response_model=list[ScenarioOut])
+def list_scenarios(
+    canonical_fixture_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)
+) -> list[ScenarioOut]:
+    fixture_row = db.query(Fixture).filter_by(canonical_fixture_id=canonical_fixture_id).first()
+    if fixture_row is None:
+        raise HTTPException(status_code=404, detail="Fixture not found")
+    rows = (
+        db.query(ScenarioPrediction)
+        .filter_by(fixture_id=fixture_row.id)
+        .order_by(ScenarioPrediction.created_at.desc())
+        .all()
+    )
+    return [_to_scenario_out(db, fixture_row, row) for row in rows]
 
 
 def _to_simulation_run_out(db: Session, run: SimulationRun) -> SimulationRunOut:

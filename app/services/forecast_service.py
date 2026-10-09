@@ -50,6 +50,7 @@ from app.services.calibration import apply_calibration
 from app.services.market_models import CARDS_MODEL, CORNERS_MODEL, FIRST_HALF_MODEL
 from app.services.model_training import DIXON_COLES
 from app.services.ood_detection import OODDetectionService
+from app.services.shock_detection import ShockDetectionService
 
 logger = get_logger(__name__)
 
@@ -75,6 +76,8 @@ class ForecastResult:
     model_disagreement_level: str | None = None
     ood_status: bool = False
     ood_flags: list[str] = field(default_factory=list)
+    shock_status: bool = False
+    shock_flags: list[str] = field(default_factory=list)
     champion_model: str | None = None
     supporting_models: list[str] = field(default_factory=list)
     ensemble_weights: dict[str, float] = field(default_factory=dict)
@@ -213,6 +216,18 @@ class ForecastService:
             if result.epistemic_uncertainty is not None:
                 result.epistemic_uncertainty *= self.settings.ood_uncertainty_inflation_factor
             result.aleatoric_uncertainty *= self.settings.ood_uncertainty_inflation_factor
+
+        # --- Shock detection (section 60) — something changed abruptly right
+        # before this match; like OOD, this widens uncertainty and warns
+        # rather than failing validation.
+        shock = ShockDetectionService(self.db, self.settings).detect(competition, home_id, away_id, disagreement)
+        if shock.is_shock:
+            result.shock_status = True
+            result.shock_flags = shock.flags
+            warnings.extend(f"SHOCK: {flag}" for flag in shock.flags)
+            if result.epistemic_uncertainty is not None:
+                result.epistemic_uncertainty *= self.settings.shock_uncertainty_inflation_factor
+            result.aleatoric_uncertainty *= self.settings.shock_uncertainty_inflation_factor
 
         result.calibration = self._calibration_diagnostic(champion, outcomes)
         result.conformal = self._conformal_diagnostic(champion, lam_h, lam_a, outcomes)
@@ -499,6 +514,7 @@ class ForecastService:
             "calibration": result.calibration,
             "conformal": result.conformal,
             "ood_flags": result.ood_flags,
+            "shock_flags": result.shock_flags,
         }
 
         prediction = Prediction(

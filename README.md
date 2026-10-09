@@ -31,17 +31,19 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 11 — Champion/challenger deployment and rollback.**
 - **Phase 12 — Testing hardening and production deployment.**
 - **Phase 13 — Monte Carlo season simulation and conformal uncertainty.**
+- **Phase 14 — Scenario engine and shock detection.**
 
 Every phase in the original 12-phase roadmap has an initial implementation.
 That means "feature-complete against the 12-phase plan," not
 "battle-tested in production" — see the **Testing hardening and production
 deployment** section below for what Phase 12 actually covers and, just as
 importantly, what it explicitly does not (load testing, a live run against
-a real provider over time, multi-instance scaling of the scheduler). Phase
-13 extends the platform beyond that original 12-phase plan with two
-specific capabilities — see **Monte Carlo season simulation and conformal
-uncertainty** below for scope and what's deliberately still out of scope.
-Note on scope: "administrator dashboard" in the roadmap is
+a real provider over time, multi-instance scaling of the scheduler). Phases
+13 and 14 extend the platform beyond that original 12-phase plan, picked
+one at a time from a gap analysis against a larger follow-on
+specification — see their own sections below for scope and what's
+deliberately still out of scope in each. Note on scope: "administrator
+dashboard" in the roadmap is
 delivered here as a secured, role-gated **API** (the diagnostics endpoints
 built in Phases 6-9, now behind auth) rather than a separate browser
 front-end — consistent with every prior phase, which is API-only with no UI
@@ -77,6 +79,8 @@ uvicorn app.api.main:app --reload
 #       POST http://127.0.0.1:8000/forecast?fixture=mock:MOCK-D1:2026:003
 #       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003
 #       GET  http://127.0.0.1:8000/predictions/mock:MOCK-D1:2026:003/distribution
+#       POST http://127.0.0.1:8000/scenarios?fixture=mock:MOCK-D1:2026:003  (JSON body: scenario_name, attack_delta, ...)
+#       GET  http://127.0.0.1:8000/scenarios/mock:MOCK-D1:2026:003
 #       POST http://127.0.0.1:8000/simulations?competition=mock:MOCK-D1
 #       GET  http://127.0.0.1:8000/simulations?competition=mock:MOCK-D1
 
@@ -134,9 +138,9 @@ app/
                   teams, fixtures, data-quality, models (+ rollback),
                   model-performance, backtests, calibration, conformal,
                   league-parameters, team-strength, forecast/predictions,
-                  simulations, sync, monitoring); its lifespan starts the
-                  background scheduler when enabled and runs the Phase 12
-                  production-safety check
+                  scenarios, simulations, sync, monitoring); its lifespan
+                  starts the background scheduler when enabled and runs the
+                  Phase 12 production-safety check
     deps.py        get_current_user / require_roles — JWT auth + RBAC dependencies
     middleware.py   request-id + structured access-log line per request (section 12)
   data/
@@ -157,7 +161,8 @@ app/
                                  and calibration fitting
     drift_metrics.py             PSI, Jensen-Shannon divergence, z-score — pure
                                  functions shared by drift_detection.py and
-                                 ood_detection.py
+                                 ood_detection.py (and, for z-score, now
+                                 shock_detection.py too)
     conformal.py                  split-conformal prediction (section 44): regression
                                  intervals + classification prediction sets, both
                                  with a finite-sample-correct quantile and an
@@ -194,6 +199,13 @@ app/
     forecast_service.py         quality gate -> ensemble score matrix -> prediction registry (section 61)
     drift_detection.py           model/data drift checks (section 42) persisted as ModelMonitoring rows
     ood_detection.py             per-forecast out-of-distribution flags that widen uncertainty (section 40)
+    shock_detection.py            per-forecast shock flags (section 60) — abnormal team-
+                                 strength jumps, scoring/conceding streaks, or extreme
+                                 model disagreement; same "widen uncertainty, don't block"
+                                 philosophy as OOD, at the same per-forecast integration point
+    scenario_engine.py            what-if deltas against a baseline forecast's anchor model
+                                 fit (section 59) — always HYPOTHETICAL, never overwrites
+                                 the baseline it varies
     sync_orchestrator.py        wires all of the above into one full-sync run
     sync_report.py               renders the section-63 synchronization report from a FullSyncReport
     scheduler.py                 optional background full-sync on a fixed interval (section 13/64)
@@ -215,7 +227,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   drift detection, OOD detection, auth service, API auth/RBAC,
                   champion/challenger gate, rate limiter, API hardening,
                   conformal prediction, conformal calibration, Monte Carlo
-                  simulation, simulation/conformal API, DB constraints)
+                  simulation, simulation/conformal API, shock detection,
+                  scenario engine, scenario/shock API, DB constraints)
 
 .github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
                                every push/PR to main (Phase 12)
@@ -842,6 +855,75 @@ underlying distribution's shape.
    legitimately contain more than one outcome, or in rare cases be empty —
    neither is a bug.
 
+### Scenario engine and shock detection (Phase 14)
+
+Two more additions beyond the original 12-phase plan, picked next from the
+same gap analysis.
+
+**Scenario engine** (`app/services/scenario_engine.py`) — the model's
+actual parameter space is per-team attack/defence strength (log scale) and
+home advantage, so every supported what-if is expressed as a delta against
+those, applied to a *copy* of the fixture's own baseline forecast's anchor
+(`dixon_coles`) fit.
+
+1. `POST /scenarios` takes a `scenario_name`, `home_advantage_delta`,
+   `attack_delta`/`defence_delta` (per-team, keyed by canonical team id —
+   only the fixture's own two teams are accepted), reuses the exact same
+   `build_score_matrix`/`outcome_probabilities` machinery `/forecast`
+   does, and returns a result always labelled `"HYPOTHETICAL"`. Every
+   delta is bounded by `scenario_max_abs_delta`, since attack/defence
+   operate on a log scale where a large delta blows up the resulting score
+   matrix numerically.
+2. The result is persisted as a `ScenarioPrediction` — a table that
+   existed in the schema since Phase 1 but, until now, nothing ever wrote
+   to — pointing at a specific `baseline_prediction_id`, with the
+   `difference` against that baseline's own expected goals/outcome
+   probabilities computed alongside the scenario's own result. It never
+   mutates the baseline `Prediction` or the champion `ModelVersion`'s
+   stored parameters (both are read, a modified in-memory copy is scored,
+   nothing is written back to either) — `forecast_service.py` never reads
+   scenario rows back, by design. `GET /scenarios/{fixture}` lists every
+   scenario ever run for a fixture; none of them are ever thrown away.
+3. **What this doesn't do**: two scenario types from the spec's own bullet
+   list aren't modelled — a data-quality-degradation assumption and a
+   tactical assumption have no mechanism here that feeds back into the
+   Dixon-Coles parameter space the way a strength delta does. A
+   "missing-player" assumption is, necessarily, just a user-supplied
+   strength delta clearly labelled hypothetical — there's no real
+   lineup/injury data source to derive a specific player's contribution
+   from, and this project never fabricates that kind of data.
+
+**Shock detection** (`app/services/shock_detection.py`) — a soft,
+per-forecast signal, exactly like OOD detection (Phase 9): something
+changed abruptly right before this specific match that the model might not
+have fully absorbed. Never blocks a forecast; widens uncertainty
+(`shock_uncertainty_inflation_factor`) and adds a warning instead. This is
+a different question, at a different integration point, from drift
+detection (`drift_detection.py`), which runs once per sync across a whole
+competition for administrator review, not any individual forecast.
+
+1. Checks, per fixture, for either team: a team-strength shock (the
+   latest `TeamStrength` snapshot's attack/defence z-scored against that
+   team's own snapshot *history*, reusing `drift_metrics.py::z_score` —
+   the same pure function drift detection uses, for a genuinely different,
+   per-fixture purpose); a scoring-pattern shock (a recent
+   `shock_recent_match_window`-match scoring or conceding average
+   z-scored against the team's own earlier matches); and extreme
+   cross-model disagreement, simply surfaced here under the "shock"
+   framing — `forecast_service.py` already computes it.
+2. Surfaced on every forecast exactly like OOD: `model_diagnostics.
+   shock_status`/`shock_flags` (`POST /forecast`, `GET
+   /predictions/{fixture}`), unlike `ood_status` not a dedicated
+   `Prediction` column — both live in `validation_report`, consistent
+   with how `calibration`/`conformal`/`ood_flags` are already stored
+   there.
+3. **What this doesn't do**: major lineup changes (no lineup data source
+   — never fabricated), provider anomalies or data-quality
+   discontinuities (no quality-status *history* is retained yet — a
+   natural follow-up), and referee or injury information (never
+   fabricated) are all in the spec's own bullet list for this feature and
+   none of them are detectable with what this project actually has.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -857,6 +939,7 @@ underlying distribution's shape.
 11. **Champion/challenger deployment + rollback** — done
 12. **Testing hardening + production deployment** — done
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
+14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 
 ## Safety & integrity
 

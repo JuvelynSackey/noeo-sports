@@ -333,6 +333,8 @@ class ModelDiagnosticsOut(BaseModel):
     data_quality_score: float | None
     ood_status: bool
     ood_flags: list[str] = []
+    shock_status: bool = False
+    shock_flags: list[str] = []
 
 
 class ModelInformationOut(BaseModel):
@@ -494,3 +496,29 @@ class SimulationRunOut(BaseModel):
     started_at: dt.datetime
     completed_at: dt.datetime | None
     standings: list[SimulationStandingOut]
+
+
+class ScenarioRequestIn(BaseModel):
+    """What-if inputs (section 59) — every delta is against the baseline
+    forecast's own anchor model fit (log-scale attack/defence strength,
+    home advantage), the only parameters this platform actually has."""
+
+    scenario_name: str
+    home_advantage_delta: float = 0.0
+    attack_delta: dict[str, float] = {}
+    defence_delta: dict[str, float] = {}
+
+
+class ScenarioOut(BaseModel):
+    """Always labelled HYPOTHETICAL (section 59) — a scenario is persisted
+    alongside, and never overwrites, the official forecast it varies."""
+
+    label: str
+    scenario_name: str
+    fixture_canonical_id: str
+    baseline_prediction_id: str
+    assumptions: dict
+    scenario_result: dict
+    difference: dict
+    requested_by: str | None
+    created_at: dt.datetime
