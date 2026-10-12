@@ -42,7 +42,11 @@ browser will be rejected before it reaches the API — see the backend's
   token. This is a UX convenience, not a security boundary — the backend
   enforces authorization itself (section 54) regardless of what this
   frontend does or doesn't render.
-- Pages: `/login`, `/` (dashboard), `/competitions/[id]` (fixtures),
+- Pages: `/login`, `/` (dashboard), `/competitions` (a filterable,
+  sortable competitions browser — status/type/country filters, sort by
+  name or team count; the Dashboard's own competitions grid is
+  deliberately unfiltered, a quick jump-off point rather than a
+  browser) and `/competitions/[id]` (fixtures),
   `/fixtures/[id]` (Match Intelligence — the forecast detail view),
   `/models` and `/models/[version]` (Model Lab — the registry, raw
   parameters, backtests, calibration, conformal and drift diagnostics,
@@ -72,8 +76,8 @@ browser will be rejected before it reaches the API — see the backend's
   from the audit log rather than a dedicated store; see the root
   README's **Model Lab**, **Backtesting Centre**, **Admin Centre**,
   **Scenario Lab**, **Data Intelligence**, **Teams**, **Forecast
-  Centre**, **Live Centre**, **Reports**, and **Synchronization report
-  and scheduling** sections).
+  Centre**, **Live Centre**, **Reports**, **Competitions**, and
+  **Synchronization report and scheduling** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -163,6 +167,12 @@ sync's own live response, and confirmed older pre-change audit entries
 `getSyncReports()` rather than rendered as broken rows — this was
 caught by the verification script itself throwing on a legacy entry
 before the filter was added.
+Competitions was checked live too: `GET /competitions` field-for-field,
+plus the page's own derived filter-option and sort logic run against
+the real response — though the mock dataset only has one status
+(`ACTIVE`), one type (`DOMESTIC_LEAGUE`) and one country
+(`Mockland`), so the filters themselves only have one real option to
+narrow by right now.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting

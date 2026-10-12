@@ -281,7 +281,7 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   Admin Centre (/admin, ADMIN only), Scenario Lab (/scenarios),
                   Data Intelligence (/data-intelligence), Teams (/teams),
                   Forecast Centre (/forecast-centre), Live Centre (/live-centre),
-                  Reports (/reports, ADMIN only) —
+                  Reports (/reports, ADMIN only), Competitions (/competitions) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -1061,16 +1061,16 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked eleven, one at
-a time — **Dashboard**, **Fixtures** (as competition detail), **Match
-Intelligence**, **Model Lab**, **Backtesting Centre**, **Admin
-Centre**, **Data Intelligence**, **Teams**, **Forecast Centre**,
-**Live Centre**, and **Reports** — rather than shipping fourteen
-shallow stubs. A twelfth page, **Scenario Lab**, isn't one of the
-spec's 14 named pages at all — it's the frontend for Phase 13/14's
-Monte Carlo simulation and scenario-engine work, which (like those
-phases themselves) is beyond the original plan and had no UI until
-now.
+well in one pass wasn't realistic, so this phase picked twelve, one at
+a time — **Dashboard**, **Fixtures** (as competition detail),
+**Competitions**, **Match Intelligence**, **Model Lab**, **Backtesting
+Centre**, **Admin Centre**, **Data Intelligence**, **Teams**,
+**Forecast Centre**, **Live Centre**, and **Reports** — rather than
+shipping fourteen shallow stubs. A thirteenth page, **Scenario Lab**,
+isn't one of the spec's 14 named pages at all — it's the frontend for
+Phase 13/14's Monte Carlo simulation and scenario-engine work, which
+(like those phases themselves) is beyond the original plan and had no
+UI until now.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1248,19 +1248,29 @@ now.
    `{provider, system_status}` and are filtered out rather than
    rendered as broken rows — a real gap the verification script itself
    caught by throwing on one of this project's own earlier test runs.
-13. **Data contract**: `lib/types.ts` is hand-written to mirror
+13. **Competitions** (`/competitions`, section 24) — open to any
+   authenticated role, and distinct from the Dashboard's own
+   competitions grid (same `GET /competitions` call, same card markup)
+   by being filterable (status, type, country, all derived client-side
+   from whatever competitions actually exist — no separate filter
+   endpoint) and sortable (name, or team count descending). The mock
+   dataset currently has exactly one status, one type and one country
+   across its two competitions, so the filters have nothing to actually
+   narrow yet — the page is still correctly built and tested against
+   the real response shape, just not interesting to use until there's
+   more variety in the data.
+14. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-14. **What this doesn't do**: the other 3 pages from section 24
-   (standalone Competitions, System Intelligence, API Management)
-   aren't built — API Management has no backend to build against at
-   all (no API-key/rate-limit management exists); System
-   Intelligence's core content (system health + the competitions list)
-   is arguably already the Dashboard in substance, just not under that
-   name. Model
+15. **What this doesn't do**: the other 2 pages from section 24
+   (System Intelligence, API Management) aren't built — API Management
+   has no backend to build against at all (no API-key/rate-limit
+   management exists); System Intelligence's core content (system
+   health + the competitions list) is arguably already the Dashboard in
+   substance, just not under that name. Model
    Lab shows raw parameters and metrics,
    never a formal model card (section 93) — the backend doesn't persist
    purpose/limitations/approval-status fields for a model version, so
@@ -1269,7 +1279,7 @@ now.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-15. **Testing**: `npm run build` and `npm run lint` both pass; every
+16. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
    `lib/types.ts` against the mock provider, across four full walks:
@@ -1327,6 +1337,11 @@ now.
    `SyncReport` field and matches the sync's own live response, and
    confirmed older pre-change audit entries are correctly filtered out
    by `getSyncReports()` rather than rendered as broken rows.
+   Competitions was checked live too: `GET /competitions`
+   field-for-field, plus the page's own derived filter-option and sort
+   logic run against the real response — the mock dataset only has one
+   status/type/country right now, so the filters have nothing to
+   actually narrow yet, but the shape and logic are confirmed correct.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1349,7 +1364,7 @@ now.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports** — done (beyond the original 12-phase plan; 11 of 14 named pages, plus Scenario Lab as a 12th, unnamed page)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions** — done (beyond the original 12-phase plan; 12 of 14 named pages, plus Scenario Lab as a 13th, unnamed page)
 
 ## Safety & integrity
 
