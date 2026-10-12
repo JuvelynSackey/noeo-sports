@@ -277,14 +277,16 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   — see frontend/README.md and this file's own Frontend section
   app/            login, dashboard (/), competition/fixtures (/competitions/[id]),
                   Match Intelligence (/fixtures/[id]), Model Lab (/models,
-                  /models/[version]) — every page is a Client Component; Cache
-                  Components is off (next.config.ts), since there's no static
-                  shell for an authenticated, API-driven app
+                  /models/[version]), Backtesting Centre (/backtesting) —
+                  every page is a Client Component; Cache Components is off
+                  (next.config.ts), since there's no static shell for an
+                  authenticated, API-driven app
   lib/            types.ts (hand-written, mirrors app/api/schemas.py), api.ts
                   (fetch client), auth.tsx (client-side JWT state)
   components/     Nav, RequireAuth, Card, StatusBadge, Disclaimer (section 86,
                   shown in the footer site-wide and again on the forecast page),
-                  forecast/ (Recharts outcome + goal-distribution charts)
+                  forecast/ (Recharts outcome + goal-distribution charts),
+                  backtesting/ (Recharts reliability/calibration scatter chart)
 ```
 
 ### Database
@@ -1048,10 +1050,10 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked four, one at a
+well in one pass wasn't realistic, so this phase picked five, one at a
 time — **Dashboard**, **Fixtures** (as competition detail), **Match
-Intelligence**, and **Model Lab** — rather than shipping fourteen shallow
-stubs.
+Intelligence**, **Model Lab**, and **Backtesting Centre** — rather than
+shipping fourteen shallow stubs.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1096,39 +1098,57 @@ stubs.
    rather than someone else's numbers. ADMIN users additionally get a
    **rollback** button (`POST /models/{version}/rollback`, Phase 11) and
    a rollback history pulled from `/audit-logs`.
-5. **Data contract**: `lib/types.ts` is hand-written to mirror
+5. **Backtesting Centre** (`/backtesting`, section 71) — compares every
+   candidate goal model for one competition side by side (the filters
+   section 71 actually asks for beyond competition — season, date range,
+   calibration method as independent filters — aren't backend-supported,
+   so this is honestly scoped to "one competition, every current
+   candidate"): a performance table (ensemble weight, Brier/log-loss/RPS,
+   folds), an overlaid reliability/calibration chart (Recharts scatter +
+   connecting line per model, plus the champion's *calibrated* curve as
+   extra series, against a dashed perfect-calibration diagonal), residual
+   diagnostics (home/away goal-residual mean±std, total-goals RMSE), and
+   the champion's conformal coverage. Building this surfaced a real bug
+   (see **Testing** below): the backend's own `/model-performance`,
+   `/backtests`, `/calibration` and `/conformal` retain every retrain's
+   row rather than scoping to "whatever's live right now," so a
+   same-competition comparison with no extra filter returned up to 4
+   duplicate rows per model from old retrains. Fixed on the frontend by
+   fetching `GET /models?status=ENABLED` first and filtering everything
+   else down to just those versions — Model Lab's per-version page was
+   never affected, since it already filters by one exact version.
+6. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-6. **What this doesn't do**: the other ~10 pages from section 24
-   (Backtesting Centre as its own page, Admin Centre — user/audit-log
-   management, Reports, API Management, Live Centre, Teams, Data
-   Intelligence) aren't built — the backtest/calibration/monitoring data
-   those pages would show is already surfaced per-model inside Model Lab
-   instead of as its own dedicated page. Scenarios (Phase 14) and Monte
-   Carlo simulations (Phase 13) have working backend endpoints but no
-   frontend page yet. Model Lab shows raw parameters and metrics, never a
-   formal model card (section 93) — the backend doesn't persist
+7. **What this doesn't do**: the other ~9 pages from section 24 (Admin
+   Centre — user/audit-log management, Reports, API Management, Live
+   Centre, Teams, Data Intelligence) aren't built. Scenarios (Phase 14)
+   and Monte Carlo simulations (Phase 13) have working backend endpoints
+   but no frontend page yet. Model Lab shows raw parameters and metrics,
+   never a formal model card (section 93) — the backend doesn't persist
    purpose/limitations/approval-status fields for a model version, so
    there's nothing to render there honestly. There's no i18n/RTL (section
    85), no timezone preference beyond the browser's own (section 84 —
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-7. **Testing**: `npm run build` and `npm run lint` both pass; every
+8. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
-   `lib/types.ts` against the mock provider, across two full walks: login
-   → competitions → competition detail → fixtures → forecast →
-   predictions, and separately models → model detail → model-performance
-   → backtests → calibration → conformal → monitoring → audit-logs →
-   rollback — the rollback call actually executed, promoting a `RETIRED`
-   dixon_coles version back to `ENABLED`. **Not verified**: the actual
-   rendered UI in a real browser — no browser-automation tool was
-   available in the environment that built this, so the visual result
-   has not been seen, only the data it's built from.
+   `lib/types.ts` against the mock provider, across three full walks:
+   login → competitions → competition detail → fixtures → forecast →
+   predictions; models → model detail → model-performance → backtests →
+   calibration → conformal → monitoring → audit-logs → rollback (the
+   rollback call actually executed, promoting a `RETIRED` dixon_coles
+   version back to `ENABLED`); and the Backtesting Centre's
+   enabled-version filter, confirmed live to collapse 12 duplicate rows
+   down to the correct 3. **Not verified**: the actual rendered UI in a
+   real browser — no browser-automation tool was available in the
+   environment that built this, so the visual result has not been seen,
+   only the data it's built from.
 
 ## Roadmap
 
@@ -1147,7 +1167,7 @@ stubs.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab** — done (beyond the original 12-phase plan; 4 of ~14 named pages)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre** — done (beyond the original 12-phase plan; 5 of ~14 named pages)
 
 ## Safety & integrity
 

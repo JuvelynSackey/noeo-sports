@@ -4,6 +4,11 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 
+const NAV_LINKS = [
+  { href: "/models", label: "Model Lab" },
+  { href: "/backtesting", label: "Backtesting Centre" },
+];
+
 export function Nav() {
   const { token, email, role, logout } = useAuth();
   const pathname = usePathname();
@@ -23,18 +28,20 @@ export function Nav() {
               the intelligence of the game, quantified
             </span>
           </Link>
-          {token && (
-            <Link
-              href="/models"
-              className={`text-sm transition hover:text-cyan-400 ${
-                pathname?.startsWith("/models")
-                  ? "text-cyan-400"
-                  : "text-slate-400"
-              }`}
-            >
-              Model Lab
-            </Link>
-          )}
+          {token &&
+            NAV_LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={`text-sm transition hover:text-cyan-400 ${
+                  pathname?.startsWith(link.href)
+                    ? "text-cyan-400"
+                    : "text-slate-400"
+                }`}
+              >
+                {link.label}
+              </Link>
+            ))}
         </div>
 
         {token && (

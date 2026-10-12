@@ -46,7 +46,11 @@ browser will be rejected before it reaches the API — see the backend's
   `/fixtures/[id]` (Match Intelligence — the forecast detail view),
   `/models` and `/models/[version]` (Model Lab — the registry, raw
   parameters, backtests, calibration, conformal and drift diagnostics,
-  and the rollback action; see the root README's **Model Lab** section).
+  and the rollback action), and `/backtesting` (Backtesting Centre —
+  compares every candidate model for one competition side by side: a
+  performance table, an overlaid reliability/calibration chart, residual
+  diagnostics, and conformal coverage; see the root README's **Model
+  Lab** and **Backtesting Centre** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -63,6 +67,15 @@ model-performance → backtests → calibration → conformal → monitoring →
 audit-logs → rollback) were checked field-for-field against
 `lib/types.ts` using the mock provider — including a real rollback,
 which actually executed and promoted a RETIRED version back to ENABLED.
+Building the Backtesting Centre also caught a real cross-page bug:
+`/model-performance`, `/backtests`, `/calibration` and `/conformal`
+retain every retrain's row rather than scoping to "whatever's live right
+now" (correct for Model Lab's per-version page, which already filters by
+an exact version), so comparing *all* candidate models for a
+competition without an extra filter returned up to 4 duplicate rows per
+model from past retrains — fixed by first fetching `GET
+/models?status=ENABLED` and filtering everything else down to just those
+versions; confirmed live that this collapsed 12 rows to the correct 3.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
