@@ -85,7 +85,7 @@ function ModelDetailContent({ version }: { version: string }) {
         getMonitoring(token, { competition, model_name: detail.model_name })
           .then((rows) => setMonitoring(rows.filter((r) => r.model_version === version)))
           .catch(() => {});
-        getAuditLogs(token, "ROLLBACK_MODEL_VERSION")
+        getAuditLogs(token, { action: "ROLLBACK_MODEL_VERSION" })
           .then((rows) =>
             setRollbackHistory(
               rows.filter(

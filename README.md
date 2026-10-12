@@ -277,7 +277,8 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   — see frontend/README.md and this file's own Frontend section
   app/            login, dashboard (/), competition/fixtures (/competitions/[id]),
                   Match Intelligence (/fixtures/[id]), Model Lab (/models,
-                  /models/[version]), Backtesting Centre (/backtesting) —
+                  /models/[version]), Backtesting Centre (/backtesting),
+                  Admin Centre (/admin, ADMIN only) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -1050,10 +1051,10 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked five, one at a
+well in one pass wasn't realistic, so this phase picked six, one at a
 time — **Dashboard**, **Fixtures** (as competition detail), **Match
-Intelligence**, **Model Lab**, and **Backtesting Centre** — rather than
-shipping fourteen shallow stubs.
+Intelligence**, **Model Lab**, **Backtesting Centre**, and **Admin
+Centre** — rather than shipping fourteen shallow stubs.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1117,15 +1118,38 @@ shipping fourteen shallow stubs.
    fetching `GET /models?status=ENABLED` first and filtering everything
    else down to just those versions — Model Lab's per-version page was
    never affected, since it already filters by one exact version.
-6. **Data contract**: `lib/types.ts` is hand-written to mirror
+6. **Admin Centre** (`/admin`, sections 19/72) — ADMIN only, gated
+   client-side on the stored role (not just a backend 403 after the fact,
+   since almost every call this page makes is ADMIN-exclusive) and
+   enforced server-side regardless. Covers what Model Lab and the
+   Backtesting Centre deliberately don't: **data synchronization**
+   (`POST /sync`, blocking, rendering the full section-63 report — teams/
+   fixtures/results counts, model activations, errors — plus
+   `POST /sync/async`, Phase 15's job queue, with the returned job polled
+   via `GET /jobs/{job_id}` every 3s until it settles); **dead-letter
+   jobs** (`GET /jobs/dead-letter`); a **cross-competition drift view**
+   (`GET /monitoring`, with a `breached_only` toggle — Model Lab's own
+   drift table is scoped to one model version, this one is "what's
+   breaching right now, anywhere"); **user management** (`GET/POST/PATCH
+   /users` — create an account, change its role, activate/deactivate it;
+   the very first ADMIN account still has to come from
+   `scripts/create_admin.py`, since `POST /users` itself requires an
+   ADMIN caller); and a general-purpose **audit log** browser
+   (`GET /audit-logs`, filterable by `action` and `actor_email` together,
+   not just the single action filter Model Lab's rollback history uses).
+   The job-queue endpoints 503 when the backend has no `REDIS_URL`
+   configured (true of this project's own dev setup) — that's surfaced as
+   an ordinary `ApiError` message, not treated as a crash.
+7. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-7. **What this doesn't do**: the other ~9 pages from section 24 (Admin
-   Centre — user/audit-log management, Reports, API Management, Live
-   Centre, Teams, Data Intelligence) aren't built. Scenarios (Phase 14)
+8. **What this doesn't do**: the other 8 pages from section 24 (Live
+   Centre, standalone Competitions, Teams, Forecast Centre, Data
+   Intelligence, System Intelligence, Reports, API Management) aren't
+   built. Scenarios (Phase 14)
    and Monte Carlo simulations (Phase 13) have working backend endpoints
    but no frontend page yet. Model Lab shows raw parameters and metrics,
    never a formal model card (section 93) — the backend doesn't persist
@@ -1135,17 +1159,28 @@ shipping fourteen shallow stubs.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-8. **Testing**: `npm run build` and `npm run lint` both pass; every
+9. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
-   `lib/types.ts` against the mock provider, across three full walks:
+   `lib/types.ts` against the mock provider, across four full walks:
    login → competitions → competition detail → fixtures → forecast →
    predictions; models → model detail → model-performance → backtests →
    calibration → conformal → monitoring → audit-logs → rollback (the
    rollback call actually executed, promoting a `RETIRED` dixon_coles
-   version back to `ENABLED`); and the Backtesting Centre's
-   enabled-version filter, confirmed live to collapse 12 duplicate rows
-   down to the correct 3. **Not verified**: the actual rendered UI in a
+   version back to `ENABLED`); the Backtesting Centre's enabled-version
+   filter, confirmed live to collapse 12 duplicate rows down to the
+   correct 3; and the Admin Centre, logged in as a real ADMIN account —
+   creating a VIEWER, promoting it to ANALYST, deactivating it and
+   confirming the deactivated account can no longer log in; `GET
+   /audit-logs` with `action` and `actor_email` filters applied together;
+   `GET /monitoring?breached_only=true`; and both job-queue endpoints
+   (`GET /jobs/dead-letter`, `POST /sync/async`), which correctly 503'd
+   against this dev backend's unconfigured `REDIS_URL`, confirming the
+   panel's error path rather than its success path. The blocking
+   `POST /sync` itself wasn't re-triggered live (expensive, and already
+   exercised by earlier phases); its response shape was checked against
+   `lib/types.ts` by reading the backend schema directly instead.
+   **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
    only the data it's built from.
@@ -1167,7 +1202,7 @@ shipping fourteen shallow stubs.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre** — done (beyond the original 12-phase plan; 5 of ~14 named pages)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre** — done (beyond the original 12-phase plan; 6 of 14 named pages)
 
 ## Safety & integrity
 

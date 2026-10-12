@@ -14,13 +14,18 @@ import type {
   ConformalCalibrationDiagnostic,
   DataQuality,
   Fixture,
+  Job,
   MatchForecast,
   ModelPerformance,
   ModelVersionDetail,
   ModelVersionSummary,
   Monitoring,
+  SyncReport,
   SystemHealth,
   TokenResponse,
+  User,
+  UserCreateIn,
+  UserUpdateIn,
 } from "./types";
 
 export const API_BASE_URL =
@@ -235,11 +240,18 @@ export function getConformal(
 /** ADMIN/ANALYST only on the backend. */
 export function getMonitoring(
   token: string,
-  params: { competition?: string; model_name?: string } = {}
+  params: {
+    competition?: string;
+    model_name?: string;
+    metric_name?: string;
+    breached_only?: boolean;
+  } = {}
 ): Promise<Monitoring[]> {
   const query = new URLSearchParams();
   if (params.competition) query.set("competition", params.competition);
   if (params.model_name) query.set("model_name", params.model_name);
+  if (params.metric_name) query.set("metric_name", params.metric_name);
+  if (params.breached_only) query.set("breached_only", "true");
   const qs = query.toString();
   return request<Monitoring[]>(`/monitoring${qs ? `?${qs}` : ""}`, {}, token);
 }
@@ -247,8 +259,67 @@ export function getMonitoring(
 /** ADMIN only on the backend. */
 export function getAuditLogs(
   token: string,
-  action?: string
+  params: { action?: string; actor_email?: string } = {}
 ): Promise<AuditLog[]> {
-  const qs = action ? `?action=${encodeURIComponent(action)}` : "";
-  return request<AuditLog[]>(`/audit-logs${qs}`, {}, token);
+  const query = new URLSearchParams();
+  if (params.action) query.set("action", params.action);
+  if (params.actor_email) query.set("actor_email", params.actor_email);
+  const qs = query.toString();
+  return request<AuditLog[]>(`/audit-logs${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+// --- Admin Centre (sections 19/72) ---
+
+/** ADMIN only on the backend. */
+export function getUsers(token: string): Promise<User[]> {
+  return request<User[]>("/users", {}, token);
+}
+
+/** ADMIN only on the backend. Can't create the first ADMIN account this
+ * way — see `scripts/create_admin.py` on the backend for bootstrapping. */
+export function createUser(
+  payload: UserCreateIn,
+  token: string
+): Promise<User> {
+  return request<User>(
+    "/users",
+    { method: "POST", body: JSON.stringify(payload) },
+    token
+  );
+}
+
+/** ADMIN only on the backend. */
+export function updateUser(
+  userId: number,
+  payload: UserUpdateIn,
+  token: string
+): Promise<User> {
+  return request<User>(
+    `/users/${userId}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+    token
+  );
+}
+
+/** ADMIN only on the backend. Runs the full sync pipeline in-request —
+ * this call blocks until it finishes. */
+export function triggerSync(token: string): Promise<SyncReport> {
+  return request<SyncReport>("/sync", { method: "POST" }, token);
+}
+
+/** ADMIN only on the backend. Enqueues the same sync instead of blocking;
+ * 503s if REDIS_URL isn't configured (no job queue backing it). Poll the
+ * returned job via `getJob`. */
+export function triggerSyncAsync(token: string): Promise<Job> {
+  return request<Job>("/sync/async", { method: "POST" }, token);
+}
+
+/** Any authenticated role. 503s if REDIS_URL isn't configured. */
+export function getJob(jobId: string, token: string): Promise<Job> {
+  return request<Job>(`/jobs/${encodeURIComponent(jobId)}`, {}, token);
+}
+
+/** ADMIN only on the backend. 503s if REDIS_URL isn't configured. */
+export function listDeadLetterJobs(token: string): Promise<Job[]> {
+  return request<Job[]>("/jobs/dead-letter", {}, token);
 }

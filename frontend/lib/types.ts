@@ -316,3 +316,76 @@ export interface AuditLog {
   details: Record<string, unknown> | null;
   occurred_at: string;
 }
+
+// --- Admin Centre (sections 19/72) ---
+
+export interface User {
+  id: number;
+  email: string;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface UserCreateIn {
+  email: string;
+  password: string;
+  role: string;
+}
+
+export interface UserUpdateIn {
+  role?: string;
+  is_active?: boolean;
+}
+
+export interface DiscoveryReport {
+  competitions_discovered: number;
+  new_competitions: string[];
+  updated_competitions: string[];
+  new_seasons: string[];
+  updated_seasons: string[];
+  errors: string[];
+}
+
+export interface MovementReport {
+  promoted: [string, string, string][];
+  relegated: [string, string, string][];
+  new_teams: [string, string][];
+  departed_teams: [string, string][];
+}
+
+export interface SyncReport {
+  provider: string;
+  started_at: string;
+  finished_at: string | null;
+  discovery: DiscoveryReport | null;
+  new_teams: number;
+  updated_teams: number;
+  renamed_teams: number;
+  new_fixtures: number;
+  updated_fixtures: number;
+  new_results: number;
+  data_quality_summary: Record<string, string>;
+  movements: MovementReport | null;
+  champion_challenger_decisions: string[];
+  models_activated: string[];
+  models_disabled: string[];
+  models_requiring_review: string[];
+  provider_errors: string[];
+  validation_errors: string[];
+  system_status: string;
+  errors: string[];
+}
+
+export interface Job {
+  job_id: string;
+  job_type: string;
+  status: string;
+  attempts: number;
+  max_retries: number;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}

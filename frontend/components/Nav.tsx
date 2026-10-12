@@ -9,6 +9,8 @@ const NAV_LINKS = [
   { href: "/backtesting", label: "Backtesting Centre" },
 ];
 
+const ADMIN_NAV_LINKS = [{ href: "/admin", label: "Admin Centre" }];
+
 export function Nav() {
   const { token, email, role, logout } = useAuth();
   const pathname = usePathname();
@@ -29,19 +31,21 @@ export function Nav() {
             </span>
           </Link>
           {token &&
-            NAV_LINKS.map((link) => (
-              <Link
-                key={link.href}
-                href={link.href}
-                className={`text-sm transition hover:text-cyan-400 ${
-                  pathname?.startsWith(link.href)
-                    ? "text-cyan-400"
-                    : "text-slate-400"
-                }`}
-              >
-                {link.label}
-              </Link>
-            ))}
+            [...NAV_LINKS, ...(role === "ADMIN" ? ADMIN_NAV_LINKS : [])].map(
+              (link) => (
+                <Link
+                  key={link.href}
+                  href={link.href}
+                  className={`text-sm transition hover:text-cyan-400 ${
+                    pathname?.startsWith(link.href)
+                      ? "text-cyan-400"
+                      : "text-slate-400"
+                  }`}
+                >
+                  {link.label}
+                </Link>
+              )
+            )}
         </div>
 
         {token && (

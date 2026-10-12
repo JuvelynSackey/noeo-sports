@@ -18,6 +18,14 @@ const PALETTES: Record<string, string> = {
   LOW_DISAGREEMENT: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
   MEDIUM_DISAGREEMENT: "bg-amber-500/15 text-amber-400 border-amber-500/30",
   HIGH_DISAGREEMENT: "bg-red-500/15 text-red-400 border-red-500/30",
+  // Job status (section 74)
+  PENDING: "bg-slate-500/15 text-slate-300 border-slate-500/30",
+  RUNNING: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+  SUCCEEDED: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  FAILED: "bg-red-500/15 text-red-400 border-red-500/30",
+  // Drift threshold breach (section 42)
+  BREACHED: "bg-red-500/15 text-red-400 border-red-500/30",
+  OK: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
 };
 
 const DEFAULT_PALETTE = "bg-slate-500/15 text-slate-300 border-slate-500/30";
