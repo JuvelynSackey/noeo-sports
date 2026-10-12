@@ -59,12 +59,16 @@ browser will be rejected before it reaches the API — see the backend's
   official forecast, plus full Monte Carlo season simulations with
   per-team title/top-N/relegation probabilities),
   `/data-intelligence` (data-quality scorecards and league baseline
-  parameters by season for a competition), and `/teams` (dynamic
+  parameters by season for a competition), `/teams` (dynamic
   attack/defence/home-away strength ratings over time for a team,
   picked via a competition's own fixtures since there's no list-all-
-  teams endpoint; see the root README's **Model Lab**, **Backtesting
-  Centre**, **Admin Centre**, **Scenario Lab**, **Data Intelligence**
-  and **Teams** sections).
+  teams endpoint), and `/forecast-centre` (every upcoming fixture in a
+  competition as one slate — expected goals, 1X2, and model-diagnostic
+  flags at a glance, with a one-click "generate" for any fixture that
+  has no forecast yet, instead of visiting Match Intelligence one
+  fixture at a time; see the root README's **Model Lab**, **Backtesting
+  Centre**, **Admin Centre**, **Scenario Lab**, **Data Intelligence**,
+  **Teams** and **Forecast Centre** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -125,6 +129,14 @@ Teams was checked the same way: `GET /teams/{id}` and both the
 competition-filtered and unfiltered forms of `GET /teams/{id}/strength`
 for a real team, confirming the response matches `lib/types.ts`'s new
 `TeamStrength` type, plus a 404 for an unknown team id.
+Forecast Centre was checked the same way: simulated the page's own
+fetch pattern against a real competition — `GET /fixtures?status=
+SCHEDULED` (12 fixtures) followed by a `GET /predictions/{id}` for each
+one concurrently, confirming the mixed 200/404 results (1 with a
+forecast, 11 without) match `lib/types.ts`'s existing `MatchForecast`
+type, then `POST /forecast` for one of the missing ones and confirming
+`GET /predictions/{id}` succeeds immediately afterward — the exact
+"generate" button flow the page exposes per row.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
