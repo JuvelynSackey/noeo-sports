@@ -20,6 +20,8 @@ import type {
   ModelVersionDetail,
   ModelVersionSummary,
   Monitoring,
+  Scenario,
+  SimulationRun,
   SyncReport,
   SystemHealth,
   TokenResponse,
@@ -322,4 +324,79 @@ export function getJob(jobId: string, token: string): Promise<Job> {
 /** ADMIN only on the backend. 503s if REDIS_URL isn't configured. */
 export function listDeadLetterJobs(token: string): Promise<Job[]> {
   return request<Job[]>("/jobs/dead-letter", {}, token);
+}
+
+// --- Scenarios & season simulations (sections 42/59) ---
+
+/** Requires a baseline forecast (`POST /forecast`) to already exist for
+ * this fixture — 422s otherwise. Deltas may only name the fixture's own
+ * two teams and must stay within the backend's configured bound
+ * (`scenario_max_abs_delta`); both constraints are enforced server-side
+ * and surfaced via the 422's own `detail` message rather than duplicated
+ * here. */
+export function runScenario(
+  fixtureId: string,
+  payload: {
+    scenario_name: string;
+    home_advantage_delta?: number;
+    attack_delta?: Record<string, number>;
+    defence_delta?: Record<string, number>;
+  },
+  token: string
+): Promise<Scenario> {
+  return request<Scenario>(
+    `/scenarios?fixture=${encodeURIComponent(fixtureId)}`,
+    { method: "POST", body: JSON.stringify(payload) },
+    token
+  );
+}
+
+export function getScenarios(fixtureId: string, token: string): Promise<Scenario[]> {
+  return request<Scenario[]>(`/scenarios/${encodeURIComponent(fixtureId)}`, {}, token);
+}
+
+interface SimulationParams {
+  competition: string;
+  season?: string;
+  n_simulations?: number;
+  random_seed?: number;
+}
+
+function simulationQuery(params: SimulationParams): string {
+  const query = new URLSearchParams();
+  query.set("competition", params.competition);
+  if (params.season) query.set("season", params.season);
+  if (params.n_simulations != null) query.set("n_simulations", String(params.n_simulations));
+  if (params.random_seed != null) query.set("random_seed", String(params.random_seed));
+  return query.toString();
+}
+
+/** Blocks until the simulation finishes — can take a while at the
+ * backend's default `n_simulations` (10,000). */
+export function runSimulation(params: SimulationParams, token: string): Promise<SimulationRun> {
+  return request<SimulationRun>(
+    `/simulations?${simulationQuery(params)}`,
+    { method: "POST" },
+    token
+  );
+}
+
+/** Enqueues the same simulation instead of blocking; 503s if REDIS_URL
+ * isn't configured. Poll the returned job via `getJob`; once SUCCEEDED,
+ * `job.result.scenario_id` is what to pass to `getSimulation`. */
+export function runSimulationAsync(params: SimulationParams, token: string): Promise<Job> {
+  return request<Job>(
+    `/simulations/async?${simulationQuery(params)}`,
+    { method: "POST" },
+    token
+  );
+}
+
+export function getSimulation(scenarioId: string, token: string): Promise<SimulationRun> {
+  return request<SimulationRun>(`/simulations/${encodeURIComponent(scenarioId)}`, {}, token);
+}
+
+export function getSimulations(token: string, competition?: string): Promise<SimulationRun[]> {
+  const qs = competition ? `?competition=${encodeURIComponent(competition)}` : "";
+  return request<SimulationRun[]>(`/simulations${qs}`, {}, token);
 }

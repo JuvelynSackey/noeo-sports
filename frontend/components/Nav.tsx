@@ -7,6 +7,7 @@ import { useAuth } from "@/lib/auth";
 const NAV_LINKS = [
   { href: "/models", label: "Model Lab" },
   { href: "/backtesting", label: "Backtesting Centre" },
+  { href: "/scenarios", label: "Scenario Lab" },
 ];
 
 const ADMIN_NAV_LINKS = [{ href: "/admin", label: "Admin Centre" }];

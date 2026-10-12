@@ -278,7 +278,7 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
   app/            login, dashboard (/), competition/fixtures (/competitions/[id]),
                   Match Intelligence (/fixtures/[id]), Model Lab (/models,
                   /models/[version]), Backtesting Centre (/backtesting),
-                  Admin Centre (/admin, ADMIN only) —
+                  Admin Centre (/admin, ADMIN only), Scenario Lab (/scenarios) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -1054,7 +1054,11 @@ Intelligence, Admin Centre, Reports, API Management). Building all of them
 well in one pass wasn't realistic, so this phase picked six, one at a
 time — **Dashboard**, **Fixtures** (as competition detail), **Match
 Intelligence**, **Model Lab**, **Backtesting Centre**, and **Admin
-Centre** — rather than shipping fourteen shallow stubs.
+Centre** — rather than shipping fourteen shallow stubs. A seventh page,
+**Scenario Lab**, isn't one of the spec's 14 named pages at all — it's
+the frontend for Phase 13/14's Monte Carlo simulation and scenario-engine
+work, which (like those phases themselves) is beyond the original plan
+and had no UI until now.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1140,18 +1144,34 @@ Centre** — rather than shipping fourteen shallow stubs.
    The job-queue endpoints 503 when the backend has no `REDIS_URL`
    configured (true of this project's own dev setup) — that's surfaced as
    an ordinary `ApiError` message, not treated as a crash.
-7. **Data contract**: `lib/types.ts` is hand-written to mirror
+7. **Scenario Lab** (`/scenarios`, sections 42/59) — open to any
+   authenticated role, unlike Admin Centre, since `/scenarios` and
+   `/simulations` are `get_current_user`-only on the backend. Two
+   independent tools: **what-if scenarios** — pick a fixture, set
+   home-advantage/attack/defence deltas against its own two teams (the
+   only parameters the anchor dixon_coles model actually has), and
+   `POST /scenarios` runs it through the same score-matrix machinery as
+   the official forecast, always labelled `HYPOTHETICAL` and compared
+   against the fixture's existing baseline (a "Generate baseline
+   forecast" button calls the same `POST /forecast` Match Intelligence
+   uses, if one doesn't exist yet); and **season simulations** — pick a
+   competition/season and `POST /simulations` (blocking) or
+   `POST /simulations/async` (Phase 15's job queue, polled) to run a
+   Monte Carlo projection, rendering each team's mean points/position and
+   title/top-N/relegation probabilities. Both the engine's own
+   validation rules (a delta naming a team outside the fixture; a delta
+   past the configured bound) surface as ordinary 422 `ApiError`
+   messages rather than being re-validated on the frontend.
+8. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-8. **What this doesn't do**: the other 8 pages from section 24 (Live
+9. **What this doesn't do**: the other 8 pages from section 24 (Live
    Centre, standalone Competitions, Teams, Forecast Centre, Data
    Intelligence, System Intelligence, Reports, API Management) aren't
-   built. Scenarios (Phase 14)
-   and Monte Carlo simulations (Phase 13) have working backend endpoints
-   but no frontend page yet. Model Lab shows raw parameters and metrics,
+   built. Model Lab shows raw parameters and metrics,
    never a formal model card (section 93) — the backend doesn't persist
    purpose/limitations/approval-status fields for a model version, so
    there's nothing to render there honestly. There's no i18n/RTL (section
@@ -1159,7 +1179,7 @@ Centre** — rather than shipping fourteen shallow stubs.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-9. **Testing**: `npm run build` and `npm run lint` both pass; every
+10. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
    `lib/types.ts` against the mock provider, across four full walks:
@@ -1179,7 +1199,18 @@ Centre** — rather than shipping fourteen shallow stubs.
    panel's error path rather than its success path. The blocking
    `POST /sync` itself wasn't re-triggered live (expensive, and already
    exercised by earlier phases); its response shape was checked against
-   `lib/types.ts` by reading the backend schema directly instead.
+   `lib/types.ts` by reading the backend schema directly instead. The
+   Scenario Lab was checked the same way: `POST /forecast` to establish a
+   baseline, then `POST /scenarios` with real attack/defence/home-
+   advantage deltas, confirming `scenario_result` and `difference` match
+   `lib/types.ts` and the result is labelled `HYPOTHETICAL`; both of the
+   engine's validation rules (an unrelated team, an out-of-bounds delta)
+   correctly 422; `GET /scenarios/{fixture}` history; and
+   `POST /simulations` with a small `n_simulations` (200, for a fast live
+   run) followed by `GET /simulations/{scenario_id}` and
+   `GET /simulations?competition=`, all matching, with
+   `POST /simulations/async` also correctly 503ing against this dev
+   backend's unconfigured `REDIS_URL`.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1202,7 +1233,7 @@ Centre** — rather than shipping fourteen shallow stubs.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre** — done (beyond the original 12-phase plan; 6 of 14 named pages)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab** — done (beyond the original 12-phase plan; 6 of 14 named pages, plus Scenario Lab as a 7th, unnamed page)
 
 ## Safety & integrity
 

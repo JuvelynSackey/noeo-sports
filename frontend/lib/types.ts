@@ -389,3 +389,71 @@ export interface Job {
   started_at: string | null;
   finished_at: string | null;
 }
+
+// --- Scenarios & season simulations (sections 42/59) ---
+
+export interface ScenarioAssumptions {
+  home_advantage_delta: number;
+  attack_delta: Record<string, number>;
+  defence_delta: Record<string, number>;
+}
+
+export interface ScenarioGoalDistribution {
+  buckets: Record<string, number>;
+  expected_total_goals: number;
+  median_total_goals: number;
+  mode_total_goals: number;
+  variance_total_goals: number;
+}
+
+export interface ScenarioResult {
+  expected_goals_home: number;
+  expected_goals_away: number;
+  outcome_probabilities: OutcomeDistribution;
+  most_probable_scorelines: Scoreline[];
+  goal_distribution: ScenarioGoalDistribution;
+}
+
+export interface ScenarioDifference {
+  expected_goals_home: number;
+  expected_goals_away: number;
+  outcome_probabilities: OutcomeDistribution;
+}
+
+export interface Scenario {
+  label: string;
+  scenario_name: string;
+  fixture_canonical_id: string;
+  baseline_prediction_id: string;
+  assumptions: ScenarioAssumptions;
+  scenario_result: ScenarioResult;
+  difference: ScenarioDifference;
+  requested_by: string | null;
+  created_at: string;
+}
+
+export interface SimulationStanding {
+  team_canonical_id: string;
+  mean_points: number;
+  mean_position: number;
+  position_probabilities: Record<string, number>;
+  title_probability: number;
+  top_n_probability: number;
+  relegation_probability: number;
+}
+
+export interface SimulationRun {
+  scenario_id: string;
+  competition_canonical_id: string;
+  season_canonical_id: string;
+  model_version: string;
+  n_simulations: number;
+  random_seed: number;
+  feature_version: string;
+  software_version: string;
+  n_remaining_fixtures: number;
+  n_unscoreable_fixtures: number;
+  started_at: string;
+  completed_at: string | null;
+  standings: SimulationStanding[];
+}

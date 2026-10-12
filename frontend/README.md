@@ -49,12 +49,17 @@ browser will be rejected before it reaches the API — see the backend's
   and the rollback action), `/backtesting` (Backtesting Centre —
   compares every candidate model for one competition side by side: a
   performance table, an overlaid reliability/calibration chart, residual
-  diagnostics, and conformal coverage), and `/admin` (Admin Centre —
+  diagnostics, and conformal coverage), `/admin` (Admin Centre —
   ADMIN only, gated client-side on the stored role as well as by the
   backend's own 403s: triggers a sync, either blocking or via the job
   queue; shows dead-lettered jobs; a cross-competition drift/monitoring
-  view; user management; and the audit log; see the root README's
-  **Model Lab**, **Backtesting Centre** and **Admin Centre** sections).
+  view; user management; and the audit log), and `/scenarios` (Scenario
+  Lab — open to any authenticated role: what-if analysis for one
+  fixture, always labelled HYPOTHETICAL and never overwriting its
+  official forecast, plus full Monte Carlo season simulations with
+  per-team title/top-N/relegation probabilities; see the root README's
+  **Model Lab**, **Backtesting Centre**, **Admin Centre** and
+  **Scenario Lab** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -93,6 +98,19 @@ itself (the blocking full pipeline) wasn't re-triggered here since it's
 expensive and already exercised by earlier phases' own testing; its
 response shape (`SyncReportOut`) was checked against `lib/types.ts` by
 reading the backend schema directly instead.
+Building the Scenario Lab, also checked live: `POST /forecast` to
+establish a baseline, then `POST /scenarios` with real attack/defence/
+home-advantage deltas against one of the two fixture teams, confirming
+`scenario_result` and `difference` (vs. the baseline) match
+`lib/types.ts` field-for-field, that the result is labelled
+`HYPOTHETICAL`, and that both of the engine's own validation rules
+(a delta naming a team not in the fixture; a delta outside the
+configured bound) correctly 422; `GET /scenarios/{fixture}` history;
+and `POST /simulations` with a small `n_simulations` (200, to keep the
+live run fast) followed by `GET /simulations/{scenario_id}` and `GET
+/simulations?competition=`, all matching. `POST /simulations/async`
+also correctly 503'd against this dev backend's unconfigured
+`REDIS_URL`.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
