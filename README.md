@@ -280,7 +280,8 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   /models/[version]), Backtesting Centre (/backtesting),
                   Admin Centre (/admin, ADMIN only), Scenario Lab (/scenarios),
                   Data Intelligence (/data-intelligence), Teams (/teams),
-                  Forecast Centre (/forecast-centre), Live Centre (/live-centre) —
+                  Forecast Centre (/forecast-centre), Live Centre (/live-centre),
+                  Reports (/reports, ADMIN only) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -572,7 +573,14 @@ to satisfy sections 34-37.
    (`OK`/`DEGRADED`/`ERROR`, derived from those, never hand-set). Every
    number is read off the report object — nothing is a hard-coded example.
    `scripts/sync_all.py` prints it; `POST /sync` returns the same fields as
-   JSON via `SyncReportOut`.
+   JSON via `SyncReportOut`, and (added alongside the frontend's Reports
+   page, Phase 16) also records the full `SyncReportOut` body as the
+   `TRIGGER_FULL_SYNC` audit entry's own `details` — no new table or
+   migration, since `AuditLog.details` is already an unstructured JSON
+   column, so `GET /audit-logs?action=TRIGGER_FULL_SYNC` is itself the
+   report history. Audit entries recorded before this change only carry
+   `{provider, system_status}`; the frontend filters those out rather
+   than rendering a broken-looking row.
 2. **Optional automatic scheduling** (`scheduler.py`, sections 13/64) — off
    by default (`settings.scheduler_enabled`), since starting the API must
    never silently begin making outbound provider calls and writing to the
@@ -1053,15 +1061,16 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked ten, one at a
-time — **Dashboard**, **Fixtures** (as competition detail), **Match
+well in one pass wasn't realistic, so this phase picked eleven, one at
+a time — **Dashboard**, **Fixtures** (as competition detail), **Match
 Intelligence**, **Model Lab**, **Backtesting Centre**, **Admin
-Centre**, **Data Intelligence**, **Teams**, **Forecast Centre**, and
-**Live Centre** — rather than shipping fourteen shallow stubs. An
-eleventh page, **Scenario Lab**, isn't one of the spec's 14 named pages
-at all — it's the frontend for Phase 13/14's Monte Carlo simulation and
-scenario-engine work, which (like those phases themselves) is beyond
-the original plan and had no UI until now.
+Centre**, **Data Intelligence**, **Teams**, **Forecast Centre**,
+**Live Centre**, and **Reports** — rather than shipping fourteen
+shallow stubs. A twelfth page, **Scenario Lab**, isn't one of the
+spec's 14 named pages at all — it's the frontend for Phase 13/14's
+Monte Carlo simulation and scenario-engine work, which (like those
+phases themselves) is beyond the original plan and had no UI until
+now.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1221,18 +1230,34 @@ the original plan and had no UI until now.
    legitimate empty state, not a bug) by temporarily flipping one
    fixture's status directly in the database and confirming it then
    appeared correctly.
-12. **Data contract**: `lib/types.ts` is hand-written to mirror
+12. **Reports** (`/reports`, section 24) — ADMIN only, gated the same
+   way as Admin Centre. The spec names this as its own page, but the
+   backend had nowhere to persist report history — `POST /sync`'s
+   result only ever lived in that one HTTP response. Rather than add a
+   new table and migration for something this project already records
+   on every sync, the backend change here (see the root README's
+   **Synchronization report and scheduling** section) makes `POST
+   /sync` additionally store its full `SyncReportOut` body as the
+   `TRIGGER_FULL_SYNC` audit entry's own `details` — `AuditLog.details`
+   is already an unstructured JSON column. This page is then just
+   `GET /audit-logs?action=TRIGGER_FULL_SYNC` rendered as proper report
+   cards (counts, promotion/relegation, champion/challenger decisions,
+   errors — expandable per entry) instead of raw JSON, reusing
+   `SyncReport`, the same frontend type Admin Centre's sync panel
+   already had. Audit entries recorded before this change only carry
+   `{provider, system_status}` and are filtered out rather than
+   rendered as broken rows — a real gap the verification script itself
+   caught by throwing on one of this project's own earlier test runs.
+13. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-13. **What this doesn't do**: the other 4 pages from section 24
-   (standalone Competitions, System Intelligence, Reports, API
-   Management) aren't built — the last two
-   have no backend to build against yet either (no persisted
-   historical-report list beyond the on-demand sync report Admin Centre
-   already shows, and no API-key/rate-limit management at all); System
+14. **What this doesn't do**: the other 3 pages from section 24
+   (standalone Competitions, System Intelligence, API Management)
+   aren't built — API Management has no backend to build against at
+   all (no API-key/rate-limit management exists); System
    Intelligence's core content (system health + the competitions list)
    is arguably already the Dashboard in substance, just not under that
    name. Model
@@ -1244,7 +1269,7 @@ the original plan and had no UI until now.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-14. **Testing**: `npm run build` and `npm run lint` both pass; every
+15. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
    `lib/types.ts` against the mock provider, across four full walks:
@@ -1295,7 +1320,13 @@ the original plan and had no UI until now.
    (0 results — a legitimate empty state), then manually flipped one
    fixture to `IN_PLAY` directly in the database, re-ran the same
    query, confirmed it appeared with every field intact, and reverted
-   it back to `SCHEDULED` afterward.
+   it back to `SCHEDULED` afterward. Reports needed the backend change
+   described above first — the full pytest suite (299 tests) was
+   re-run and passed after it. Checked live: triggered a real sync,
+   confirmed the resulting audit entry's `details` carries every
+   `SyncReport` field and matches the sync's own live response, and
+   confirmed older pre-change audit entries are correctly filtered out
+   by `getSyncReports()` rather than rendered as broken rows.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1318,7 +1349,7 @@ the original plan and had no UI until now.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre** — done (beyond the original 12-phase plan; 10 of 14 named pages, plus Scenario Lab as an 11th, unnamed page)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports** — done (beyond the original 12-phase plan; 11 of 14 named pages, plus Scenario Lab as a 12th, unnamed page)
 
 ## Safety & integrity
 

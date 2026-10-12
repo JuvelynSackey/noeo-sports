@@ -14,7 +14,10 @@ const NAV_LINKS = [
   { href: "/teams", label: "Teams" },
 ];
 
-const ADMIN_NAV_LINKS = [{ href: "/admin", label: "Admin Centre" }];
+const ADMIN_NAV_LINKS = [
+  { href: "/admin", label: "Admin Centre" },
+  { href: "/reports", label: "Reports" },
+];
 
 export function Nav() {
   const { token, email, role, logout } = useAuth();

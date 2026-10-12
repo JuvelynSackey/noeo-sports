@@ -290,6 +290,22 @@ export function getMonitoring(
   return request<Monitoring[]>(`/monitoring${qs ? `?${qs}` : ""}`, {}, token);
 }
 
+/** ADMIN only on the backend (same as `GET /audit-logs`). The section-63
+ * sync report has no dedicated store — every `POST /sync` records its
+ * full `SyncReportOut` body as this audit entry's own `details`, so a
+ * history of past reports is just this action filtered and cast back to
+ * `SyncReport`. */
+export function getSyncReports(token: string): Promise<SyncReport[]> {
+  return getAuditLogs(token, { action: "TRIGGER_FULL_SYNC" }).then((rows) =>
+    rows
+      .map((row) => row.details as unknown as SyncReport | null)
+      // Entries recorded before this report format existed only carry
+      // {provider, system_status} — skip them rather than render a
+      // broken-looking row with "undefined" everywhere.
+      .filter((d): d is SyncReport => !!d && "started_at" in d)
+  );
+}
+
 /** ADMIN only on the backend. */
 export function getAuditLogs(
   token: string,

@@ -66,11 +66,14 @@ browser will be rejected before it reaches the API — see the backend's
   competition as one slate — expected goals, 1X2, and model-diagnostic
   flags at a glance, with a one-click "generate" for any fixture that
   has no forecast yet, instead of visiting Match Intelligence one
-  fixture at a time), and `/live-centre` (every IN_PLAY fixture across
+  fixture at a time), `/live-centre` (every IN_PLAY fixture across
   every competition, polled every 15s since there's no websocket/SSE
-  channel; see the root README's **Model Lab**, **Backtesting
-  Centre**, **Admin Centre**, **Scenario Lab**, **Data Intelligence**,
-  **Teams**, **Forecast Centre** and **Live Centre** sections).
+  channel), and `/reports` (ADMIN only: every past full sync, read back
+  from the audit log rather than a dedicated store; see the root
+  README's **Model Lab**, **Backtesting Centre**, **Admin Centre**,
+  **Scenario Lab**, **Data Intelligence**, **Teams**, **Forecast
+  Centre**, **Live Centre**, **Reports**, and **Synchronization report
+  and scheduling** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -149,6 +152,17 @@ actually IN_PLAY right now, a legitimate empty state), then manually
 flipped one fixture to `IN_PLAY` in the database, re-ran the same
 query, confirmed it appeared with every `FixtureOut` field intact, and
 reverted it back to `SCHEDULED` afterward.
+Reports needed a small backend change first: `POST /sync` now records
+its full `SyncReportOut` body as the `TRIGGER_FULL_SYNC` audit entry's
+own `details` (no new table — `AuditLog.details` is already JSON), with
+the full backend test suite (299 tests) re-run and passing after that
+change. Checked live: triggered a real sync, confirmed the resulting
+audit entry's `details` has every `SyncReport` field and matches the
+sync's own live response, and confirmed older pre-change audit entries
+(only `{provider, system_status}`) are correctly filtered out by
+`getSyncReports()` rather than rendered as broken rows — this was
+caught by the verification script itself throwing on a legacy entry
+before the filter was added.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting

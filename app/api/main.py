@@ -1196,10 +1196,7 @@ def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> S
         close = getattr(provider, "close", None)
         if callable(close):
             close()
-    record_audit(db, actor, "TRIGGER_FULL_SYNC", resource_type="sync", details={"provider": report.provider, "system_status": report.system_status})
-    db.commit()
-    get_cache().delete("cache:competitions")
-    return SyncReportOut(
+    result = SyncReportOut(
         provider=report.provider,
         started_at=report.started_at,
         finished_at=report.finished_at,
@@ -1221,6 +1218,19 @@ def sync(db: Session = Depends(get_db), actor: User = Depends(_ADMIN_ONLY)) -> S
         system_status=report.system_status,
         errors=report.errors,
     )
+    # The full report is stored as this audit entry's `details` (section 54's
+    # AuditLog.details is an unstructured JSON column) rather than a new
+    # table, so GET /audit-logs?action=TRIGGER_FULL_SYNC is itself the
+    # section-63 report history the frontend's Reports page reads from —
+    # no separate persistence mechanism or migration needed for something
+    # this project already records on every sync.
+    record_audit(
+        db, actor, "TRIGGER_FULL_SYNC", resource_type="sync",
+        details=result.model_dump(mode="json"),
+    )
+    db.commit()
+    get_cache().delete("cache:competitions")
+    return result
 
 
 def _job_unavailable() -> HTTPException:
