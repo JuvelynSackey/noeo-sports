@@ -33,6 +33,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 13 — Monte Carlo season simulation and conformal uncertainty.**
 - **Phase 14 — Scenario engine and shock detection.**
 - **Phase 15 — Redis cache and local async job queue.**
+- **Phase 16 — Frontend (dashboard, fixtures, Match Intelligence).**
 
 Every phase in the original 12-phase roadmap has an initial implementation.
 That means "feature-complete against the 12-phase plan," not
@@ -40,15 +41,15 @@ That means "feature-complete against the 12-phase plan," not
 deployment** section below for what Phase 12 actually covers and, just as
 importantly, what it explicitly does not (load testing, a live run against
 a real provider over time, multi-instance scaling of the scheduler). Phases
-13-15 extend the platform beyond that original 12-phase plan, picked
+13-16 extend the platform beyond that original 12-phase plan, picked
 one at a time from a gap analysis against a larger follow-on
 specification — see their own sections below for scope and what's
-deliberately still out of scope in each. Note on scope: "administrator
-dashboard" in the roadmap is
-delivered here as a secured, role-gated **API** (the diagnostics endpoints
-built in Phases 6-9, now behind auth) rather than a separate browser
-front-end — consistent with every prior phase, which is API-only with no UI
-layer of its own.
+deliberately still out of scope in each. Note on scope: through Phase 15,
+"administrator dashboard" in the roadmap was delivered as a secured,
+role-gated **API only** (the diagnostics endpoints built in Phases 6-9,
+behind auth) with no browser UI of its own; Phase 16 is where an actual
+UI starts, covering 3 of the full specification's ~14 named pages — see
+**Frontend** below for exactly which, and which aren't built yet.
 
 ## Quickstart
 
@@ -118,6 +119,22 @@ live out of the box:
 ```bash
 docker compose up --build
 ```
+
+Run the frontend (Phase 16 — see its own **Frontend** section below and
+[`frontend/README.md`](frontend/README.md)):
+
+```bash
+cd frontend
+npm install
+cp .env.example .env.local
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000). It needs the backend
+running and reachable, with its origin allowed in
+`CORS_ALLOWED_ORIGINS=["http://localhost:3000"]` (see **Quickstart**
+above) — without that, every request from the browser is rejected before
+it reaches the API.
 
 ## Data providers
 
@@ -255,6 +272,18 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
 
 .github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
                                every push/PR to main (Phase 12)
+
+frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
+                  — see frontend/README.md and this file's own Frontend section
+  app/            login, dashboard (/), competition/fixtures (/competitions/[id]),
+                  Match Intelligence (/fixtures/[id]) — every page is a Client
+                  Component; Cache Components is off (next.config.ts), since
+                  there's no static shell for an authenticated, API-driven app
+  lib/            types.ts (hand-written, mirrors app/api/schemas.py), api.ts
+                  (fetch client), auth.tsx (client-side JWT state)
+  components/     Nav, RequireAuth, Card, StatusBadge, Disclaimer (section 86,
+                  shown in the footer site-wide and again on the forecast page),
+                  forecast/ (Recharts outcome + goal-distribution charts)
 ```
 
 ### Database
@@ -1012,6 +1041,67 @@ than silently doing nothing.
    fine for a demo or a moderate-volume deployment, not for one that
    never restarts Redis and never prunes.
 
+### Frontend (Phase 16)
+
+The build specification's section 24 names roughly 14 pages (Dashboard,
+Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
+Centre, Model Lab, Backtesting Centre, Data Intelligence, System
+Intelligence, Admin Centre, Reports, API Management). Building all of them
+well in one pass wasn't realistic, so this phase deliberately picked the
+three that are most central and that showcase the richest backend data
+already built — **Dashboard**, **Fixtures** (as competition detail), and
+**Match Intelligence** — rather than shipping fourteen shallow stubs.
+
+1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
+   the spec's own section 24. Lives in `frontend/`, a separate npm
+   project alongside the Python backend (the spec's own suggested
+   `backend/`/`frontend/` split, section 82) — nothing in `app/` changed
+   to accommodate it.
+2. **Auth** — a login page calling the existing `POST /auth/token`
+   (section 54, unchanged); the JWT is kept in `localStorage` only, read
+   by a client-side auth context (`lib/auth.tsx`). There's no
+   server-side session here — this is a thin client over an
+   already-authenticated API, not a server that itself holds
+   credentials. Route protection (`RequireAuth`, redirecting to `/login`
+   without a token) is a UX convenience; the backend enforces
+   authorization itself regardless of what this frontend renders.
+3. **Pages**: `/` (system health + the competitions list), `/competitions/[id]`
+   (seasons, a status-filterable fixtures list), and `/fixtures/[id]` —
+   the **Match Intelligence** page (section 68): expected goals, 1X2
+   probabilities, the most-probable-scorelines table, goal distribution
+   (BTTS/clean sheets/over-under), first-half/corners/cards, conformal
+   intervals (Phase 13) with their measured empirical coverage, model
+   diagnostics (disagreement, uncertainty, OOD/shock flags from Phases 9
+   and 14), ensemble weights, and administrator notes — every field this
+   page shows comes directly from `GET /predictions/{fixture}` /
+   `POST /forecast`, with nothing computed or guessed on the frontend
+   itself. The responsible-use disclaimer (section 86) is in the root
+   layout's footer on every page and repeated, compact, directly above
+   the forecast numbers on this one.
+4. **Data contract**: `lib/types.ts` is hand-written to mirror
+   `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
+   a natural follow-up. Verified field-for-field against the live mock
+   provider's actual responses while building this (see **Testing**
+   below), but there's no automated check keeping the two in sync going
+   forward; a backend schema change won't fail a frontend build today.
+5. **What this doesn't do**: the other ~11 pages from section 24 (Model
+   Lab, Backtesting Centre, Admin Centre — user/audit-log management,
+   Reports, API Management, Live Centre, Teams, Data Intelligence) aren't
+   built. Scenarios (Phase 14) and Monte Carlo simulations (Phase 13)
+   have working backend endpoints but no frontend page yet. There's no
+   i18n/RTL (section 85), no timezone preference beyond the browser's own
+   (section 84 — kickoff times render in whatever timezone the viewer's
+   browser is in), and no real NOEO SPORTS logo asset (just a typographic
+   wordmark) since none was supplied.
+6. **Testing**: `npm run build` and `npm run lint` both pass; every
+   route's server-rendered HTML returns `200`; and the live backend's
+   actual JSON responses (login → competitions → competition detail →
+   fixtures → forecast → predictions) were checked field-for-field
+   against `lib/types.ts` against the mock provider. **Not verified**:
+   the actual rendered UI in a real browser — no browser-automation tool
+   was available in the environment that built this, so the visual
+   result has not been seen, only the data it's built from.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -1029,6 +1119,7 @@ than silently doing nothing.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
+16. **Frontend: dashboard, fixtures, Match Intelligence** — done (beyond the original 12-phase plan; 3 of ~14 named pages)
 
 ## Safety & integrity
 
