@@ -279,7 +279,7 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   Match Intelligence (/fixtures/[id]), Model Lab (/models,
                   /models/[version]), Backtesting Centre (/backtesting),
                   Admin Centre (/admin, ADMIN only), Scenario Lab (/scenarios),
-                  Data Intelligence (/data-intelligence) —
+                  Data Intelligence (/data-intelligence), Teams (/teams) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -1052,12 +1052,12 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked seven, one at a
+well in one pass wasn't realistic, so this phase picked eight, one at a
 time — **Dashboard**, **Fixtures** (as competition detail), **Match
 Intelligence**, **Model Lab**, **Backtesting Centre**, **Admin
-Centre**, and **Data Intelligence** — rather than shipping fourteen
-shallow stubs. An eighth page, **Scenario Lab**, isn't one of the
-spec's 14 named pages at all — it's the frontend for Phase 13/14's
+Centre**, **Data Intelligence**, and **Teams** — rather than shipping
+fourteen shallow stubs. A ninth page, **Scenario Lab**, isn't one of
+the spec's 14 named pages at all — it's the frontend for Phase 13/14's
 Monte Carlo simulation and scenario-engine work, which (like those
 phases themselves) is beyond the original plan and had no UI until now.
 
@@ -1177,14 +1177,27 @@ phases themselves) is beyond the original plan and had no UI until now.
    `getDataQuality` had existed in `lib/api.ts` since the very first
    frontend commit but had never actually been called from a page before
    this.
-9. **Data contract**: `lib/types.ts` is hand-written to mirror
+9. **Teams** (`/teams`, section 9) — open to any authenticated role.
+   There's no list-all-teams endpoint, so a team is found the same way
+   Scenario Lab finds one: pick a competition, derive its teams from
+   `GET /fixtures?competition=`, then pick one. `GET /teams/{id}` for
+   identity (name, country, reserve/dissolved flags) and
+   `GET /teams/{id}/strength?competition=` for the dynamic strength
+   time series — attack/defence, home/away, opponent-adjusted and
+   recency-weighted variants, each with its own estimation uncertainty
+   — rendered as both a latest-snapshot table and an attack-vs-defence
+   line chart (`components/teams/StrengthChart.tsx`, the same Recharts
+   pattern as the Backtesting Centre's reliability chart). Deliberately
+   no team-level form table or forecast here — that's the competition's
+   fixtures list and Match Intelligence.
+10. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-10. **What this doesn't do**: the other 7 pages from section 24 (Live
-   Centre, standalone Competitions, Teams, Forecast Centre, System
+11. **What this doesn't do**: the other 6 pages from section 24 (Live
+   Centre, standalone Competitions, Forecast Centre, System
    Intelligence, Reports, API Management) aren't built — the last two
    have no backend to build against yet either (no persisted
    historical-report list beyond the on-demand sync report Admin Centre
@@ -1197,7 +1210,7 @@ phases themselves) is beyond the original plan and had no UI until now.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-11. **Testing**: `npm run build` and `npm run lint` both pass; every
+12. **Testing**: `npm run build` and `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
    `lib/types.ts` against the mock provider, across four full walks:
@@ -1231,7 +1244,10 @@ phases themselves) is beyond the original plan and had no UI until now.
    backend's unconfigured `REDIS_URL`. Data Intelligence was checked the
    same way: `GET /data-quality?competition=` and
    `GET /league-parameters?competition=` for a real competition, every
-   field matching `lib/types.ts`.
+   field matching `lib/types.ts`. Teams was checked the same way:
+   `GET /teams/{id}` plus both the competition-filtered and unfiltered
+   forms of `GET /teams/{id}/strength`, every field matching the new
+   `TeamStrength` type, and a 404 for an unknown team id.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1254,7 +1270,7 @@ phases themselves) is beyond the original plan and had no UI until now.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence** — done (beyond the original 12-phase plan; 7 of 14 named pages, plus Scenario Lab as an 8th, unnamed page)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams** — done (beyond the original 12-phase plan; 8 of 14 named pages, plus Scenario Lab as a 9th, unnamed page)
 
 ## Safety & integrity
 

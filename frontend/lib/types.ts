@@ -83,6 +83,20 @@ export interface DataQuality {
   evaluated_at: string;
 }
 
+export interface TeamStrength {
+  team_canonical_id: string;
+  competition_canonical_id: string;
+  as_of: string;
+  attack_strength: number | null;
+  defence_strength: number | null;
+  home_strength: number | null;
+  away_strength: number | null;
+  opponent_adjusted_strength: number | null;
+  recent_strength: number | null;
+  uncertainty: number | null;
+  method: string | null;
+}
+
 export interface LeagueParameter {
   competition_canonical_id: string;
   season_canonical_id: string;

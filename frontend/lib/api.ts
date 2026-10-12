@@ -25,6 +25,8 @@ import type {
   SimulationRun,
   SyncReport,
   SystemHealth,
+  Team,
+  TeamStrength,
   TokenResponse,
   User,
   UserCreateIn,
@@ -130,6 +132,25 @@ export function getDataQuality(
     ? `?competition=${encodeURIComponent(competition)}`
     : "";
   return request<DataQuality[]>(`/data-quality${qs}`, {}, token);
+}
+
+export function getTeam(teamId: string, token: string): Promise<Team> {
+  return request<Team>(`/teams/${encodeURIComponent(teamId)}`, {}, token);
+}
+
+export function getTeamStrength(
+  teamId: string,
+  token: string,
+  competition?: string
+): Promise<TeamStrength[]> {
+  const qs = competition
+    ? `?competition=${encodeURIComponent(competition)}`
+    : "";
+  return request<TeamStrength[]>(
+    `/teams/${encodeURIComponent(teamId)}/strength${qs}`,
+    {},
+    token
+  );
 }
 
 export function getLeagueParameters(

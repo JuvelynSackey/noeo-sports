@@ -57,11 +57,14 @@ browser will be rejected before it reaches the API — see the backend's
   Lab — open to any authenticated role: what-if analysis for one
   fixture, always labelled HYPOTHETICAL and never overwriting its
   official forecast, plus full Monte Carlo season simulations with
-  per-team title/top-N/relegation probabilities), and
+  per-team title/top-N/relegation probabilities),
   `/data-intelligence` (data-quality scorecards and league baseline
-  parameters by season for a competition; see the root README's
-  **Model Lab**, **Backtesting Centre**, **Admin Centre**, **Scenario
-  Lab** and **Data Intelligence** sections).
+  parameters by season for a competition), and `/teams` (dynamic
+  attack/defence/home-away strength ratings over time for a team,
+  picked via a competition's own fixtures since there's no list-all-
+  teams endpoint; see the root README's **Model Lab**, **Backtesting
+  Centre**, **Admin Centre**, **Scenario Lab**, **Data Intelligence**
+  and **Teams** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -118,6 +121,10 @@ and `GET /league-parameters?competition=` for a real competition, every
 field matching `lib/types.ts` (the latter needed a new `LeagueParameter`
 type and `getLeagueParameters` client function — `getDataQuality` already
 existed but had never actually been called from a page before this).
+Teams was checked the same way: `GET /teams/{id}` and both the
+competition-filtered and unfiltered forms of `GET /teams/{id}/strength`
+for a real team, confirming the response matches `lib/types.ts`'s new
+`TeamStrength` type, plus a 404 for an unknown team id.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
