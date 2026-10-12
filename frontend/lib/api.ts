@@ -15,6 +15,7 @@ import type {
   DataQuality,
   Fixture,
   Job,
+  LeagueParameter,
   MatchForecast,
   ModelPerformance,
   ModelVersionDetail,
@@ -129,6 +130,16 @@ export function getDataQuality(
     ? `?competition=${encodeURIComponent(competition)}`
     : "";
   return request<DataQuality[]>(`/data-quality${qs}`, {}, token);
+}
+
+export function getLeagueParameters(
+  token: string,
+  competition?: string
+): Promise<LeagueParameter[]> {
+  const qs = competition
+    ? `?competition=${encodeURIComponent(competition)}`
+    : "";
+  return request<LeagueParameter[]>(`/league-parameters${qs}`, {}, token);
 }
 
 export function getPrediction(

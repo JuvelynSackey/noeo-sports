@@ -83,6 +83,20 @@ export interface DataQuality {
   evaluated_at: string;
 }
 
+export interface LeagueParameter {
+  competition_canonical_id: string;
+  season_canonical_id: string;
+  avg_home_goals: number | null;
+  avg_away_goals: number | null;
+  avg_total_goals: number | null;
+  home_advantage: number | null;
+  draw_frequency: number | null;
+  scoring_variance: number | null;
+  sample_size: number;
+  shrinkage_applied: boolean;
+  computed_at: string;
+}
+
 export interface ExpectedGoals {
   home: number | null;
   away: number | null;

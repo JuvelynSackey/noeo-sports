@@ -8,6 +8,7 @@ const NAV_LINKS = [
   { href: "/models", label: "Model Lab" },
   { href: "/backtesting", label: "Backtesting Centre" },
   { href: "/scenarios", label: "Scenario Lab" },
+  { href: "/data-intelligence", label: "Data Intelligence" },
 ];
 
 const ADMIN_NAV_LINKS = [{ href: "/admin", label: "Admin Centre" }];

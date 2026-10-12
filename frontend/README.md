@@ -53,13 +53,15 @@ browser will be rejected before it reaches the API — see the backend's
   ADMIN only, gated client-side on the stored role as well as by the
   backend's own 403s: triggers a sync, either blocking or via the job
   queue; shows dead-lettered jobs; a cross-competition drift/monitoring
-  view; user management; and the audit log), and `/scenarios` (Scenario
+  view; user management; and the audit log), `/scenarios` (Scenario
   Lab — open to any authenticated role: what-if analysis for one
   fixture, always labelled HYPOTHETICAL and never overwriting its
   official forecast, plus full Monte Carlo season simulations with
-  per-team title/top-N/relegation probabilities; see the root README's
-  **Model Lab**, **Backtesting Centre**, **Admin Centre** and
-  **Scenario Lab** sections).
+  per-team title/top-N/relegation probabilities), and
+  `/data-intelligence` (data-quality scorecards and league baseline
+  parameters by season for a competition; see the root README's
+  **Model Lab**, **Backtesting Centre**, **Admin Centre**, **Scenario
+  Lab** and **Data Intelligence** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -111,6 +113,11 @@ live run fast) followed by `GET /simulations/{scenario_id}` and `GET
 /simulations?competition=`, all matching. `POST /simulations/async`
 also correctly 503'd against this dev backend's unconfigured
 `REDIS_URL`.
+Data Intelligence was checked the same way: `GET /data-quality?competition=`
+and `GET /league-parameters?competition=` for a real competition, every
+field matching `lib/types.ts` (the latter needed a new `LeagueParameter`
+type and `getLeagueParameters` client function — `getDataQuality` already
+existed but had never actually been called from a page before this).
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
