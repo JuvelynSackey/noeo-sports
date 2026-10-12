@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth";
 
 const NAV_LINKS = [
+  { href: "/live-centre", label: "Live Centre" },
   { href: "/forecast-centre", label: "Forecast Centre" },
   { href: "/models", label: "Model Lab" },
   { href: "/backtesting", label: "Backtesting Centre" },

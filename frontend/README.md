@@ -66,9 +66,11 @@ browser will be rejected before it reaches the API — see the backend's
   competition as one slate — expected goals, 1X2, and model-diagnostic
   flags at a glance, with a one-click "generate" for any fixture that
   has no forecast yet, instead of visiting Match Intelligence one
-  fixture at a time; see the root README's **Model Lab**, **Backtesting
+  fixture at a time), and `/live-centre` (every IN_PLAY fixture across
+  every competition, polled every 15s since there's no websocket/SSE
+  channel; see the root README's **Model Lab**, **Backtesting
   Centre**, **Admin Centre**, **Scenario Lab**, **Data Intelligence**,
-  **Teams** and **Forecast Centre** sections).
+  **Teams**, **Forecast Centre** and **Live Centre** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -137,6 +139,16 @@ forecast, 11 without) match `lib/types.ts`'s existing `MatchForecast`
 type, then `POST /forecast` for one of the missing ones and confirming
 `GET /predictions/{id}` succeeds immediately afterward — the exact
 "generate" button flow the page exposes per row.
+Live Centre was checked live too: confirmed `GET /fixtures` returns no
+`competition_canonical_id` field (the reason this page fetches per
+competition rather than parsing one out of the fixture id, a fragile
+pattern this project already fixed once elsewhere), ran the page's own
+per-competition `status=IN_PLAY` query against both of the dev
+database's competitions (0 results — the mock dataset has no fixture
+actually IN_PLAY right now, a legitimate empty state), then manually
+flipped one fixture to `IN_PLAY` in the database, re-ran the same
+query, confirmed it appeared with every `FixtureOut` field intact, and
+reverted it back to `SCHEDULED` afterward.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting
