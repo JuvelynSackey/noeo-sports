@@ -201,3 +201,118 @@ export interface MatchForecast {
   model_information: ModelInformation;
   administrator_notes: AdministratorNotes;
 }
+
+// --- Model Lab (section 70) ---
+
+export interface ModelVersionSummary {
+  model_name: string;
+  version: string;
+  status: string;
+  disabled_reason: string | null;
+  competition_canonical_id: string | null;
+  trained_at: string | null;
+  training_window_start: string | null;
+  training_window_end: string | null;
+  evaluation_metrics: Record<string, unknown> | null;
+  is_reproducible: boolean;
+}
+
+export interface ModelVersionDetail extends ModelVersionSummary {
+  hyperparameters: Record<string, unknown> | null;
+  parameters: {
+    attack?: Record<string, number>;
+    defence?: Record<string, number>;
+    home_advantage?: number;
+    rho?: number;
+    team_ids?: string[];
+  } | null;
+}
+
+export interface ModelPerformance {
+  competition_canonical_id: string;
+  model_name: string;
+  model_version: string;
+  ensemble_weight: number | null;
+  brier_score: number | null;
+  log_loss: number | null;
+  ranked_probability_score: number | null;
+  n_folds: number | null;
+  n_predictions: number | null;
+  exact_score_mean_probability: number | null;
+  total_goals_rmse: number | null;
+  evaluated_at: string;
+}
+
+export interface ReliabilityPoint {
+  [key: string]: number;
+}
+
+export interface Backtest {
+  competition_canonical_id: string;
+  model_name: string;
+  model_version: string;
+  n_folds: number | null;
+  n_predictions: number | null;
+  brier_score: number | null;
+  log_loss: number | null;
+  ranked_probability_score: number | null;
+  calibration_error: number | null;
+  exact_score_mean_log_loss: number | null;
+  exact_score_mean_probability: number | null;
+  home_goal_residual_mean: number | null;
+  home_goal_residual_std: number | null;
+  away_goal_residual_mean: number | null;
+  away_goal_residual_std: number | null;
+  total_goals_rmse: number | null;
+  reliability_curve: ReliabilityPoint[] | null;
+  evaluated_at: string;
+}
+
+export interface Calibration {
+  competition_canonical_id: string;
+  model_name: string;
+  model_version: string;
+  method: string;
+  brier_score: number | null;
+  log_loss: number | null;
+  ranked_probability_score: number | null;
+  calibration_error: number | null;
+  reliability_curve: ReliabilityPoint[] | null;
+  evaluated_at: string;
+}
+
+export interface ConformalCalibrationDiagnostic {
+  competition_canonical_id: string;
+  model_name: string;
+  model_version: string;
+  target: string;
+  method: string;
+  alpha: number;
+  quantile: number;
+  n_calibration: number;
+  n_test: number;
+  empirical_coverage: number | null;
+  evaluated_at: string;
+}
+
+export interface Monitoring {
+  competition_canonical_id: string;
+  model_name: string;
+  model_version: string;
+  metric_name: string;
+  metric_value: number;
+  threshold: number | null;
+  breached: boolean;
+  detail: Record<string, unknown> | null;
+  evaluated_at: string;
+}
+
+export interface AuditLog {
+  actor_email: string | null;
+  actor_role: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  details: Record<string, unknown> | null;
+  occurred_at: string;
+}

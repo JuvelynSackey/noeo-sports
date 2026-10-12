@@ -6,11 +6,19 @@
 // (e.g. "no ENABLED dixon_coles model for this competition").
 
 import type {
+  AuditLog,
+  Backtest,
+  Calibration,
   Competition,
   CompetitionDetail,
+  ConformalCalibrationDiagnostic,
   DataQuality,
   Fixture,
   MatchForecast,
+  ModelPerformance,
+  ModelVersionDetail,
+  ModelVersionSummary,
+  Monitoring,
   SystemHealth,
   TokenResponse,
 } from "./types";
@@ -136,4 +144,111 @@ export function postForecast(
     { method: "POST" },
     token
   );
+}
+
+// --- Model Lab (section 70) ---
+
+export function getModels(
+  token: string,
+  params: { competition?: string; model_name?: string; status?: string } = {}
+): Promise<ModelVersionSummary[]> {
+  const query = new URLSearchParams();
+  if (params.competition) query.set("competition", params.competition);
+  if (params.model_name) query.set("model_name", params.model_name);
+  if (params.status) query.set("status", params.status);
+  const qs = query.toString();
+  return request<ModelVersionSummary[]>(`/models${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+/** ADMIN/ANALYST only on the backend — callers should expect this to
+ * reject with a 403 ApiError for a VIEWER and surface that, not hide the
+ * page entirely (the list above is open to any authenticated role). */
+export function getModelVersion(
+  version: string,
+  token: string
+): Promise<ModelVersionDetail> {
+  return request<ModelVersionDetail>(
+    `/models/${encodeURIComponent(version)}`,
+    {},
+    token
+  );
+}
+
+/** ADMIN only on the backend. */
+export function rollbackModel(
+  version: string,
+  token: string
+): Promise<ModelVersionDetail> {
+  return request<ModelVersionDetail>(
+    `/models/${encodeURIComponent(version)}/rollback`,
+    { method: "POST" },
+    token
+  );
+}
+
+export function getModelPerformance(
+  token: string,
+  competition?: string
+): Promise<ModelPerformance[]> {
+  const qs = competition
+    ? `?competition=${encodeURIComponent(competition)}`
+    : "";
+  return request<ModelPerformance[]>(`/model-performance${qs}`, {}, token);
+}
+
+export function getBacktests(
+  token: string,
+  params: { competition?: string; model_name?: string } = {}
+): Promise<Backtest[]> {
+  const query = new URLSearchParams();
+  if (params.competition) query.set("competition", params.competition);
+  if (params.model_name) query.set("model_name", params.model_name);
+  const qs = query.toString();
+  return request<Backtest[]>(`/backtests${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+export function getCalibration(
+  token: string,
+  competition?: string
+): Promise<Calibration[]> {
+  const qs = competition
+    ? `?competition=${encodeURIComponent(competition)}`
+    : "";
+  return request<Calibration[]>(`/calibration${qs}`, {}, token);
+}
+
+export function getConformal(
+  token: string,
+  params: { competition?: string; target?: string } = {}
+): Promise<ConformalCalibrationDiagnostic[]> {
+  const query = new URLSearchParams();
+  if (params.competition) query.set("competition", params.competition);
+  if (params.target) query.set("target", params.target);
+  const qs = query.toString();
+  return request<ConformalCalibrationDiagnostic[]>(
+    `/conformal${qs ? `?${qs}` : ""}`,
+    {},
+    token
+  );
+}
+
+/** ADMIN/ANALYST only on the backend. */
+export function getMonitoring(
+  token: string,
+  params: { competition?: string; model_name?: string } = {}
+): Promise<Monitoring[]> {
+  const query = new URLSearchParams();
+  if (params.competition) query.set("competition", params.competition);
+  if (params.model_name) query.set("model_name", params.model_name);
+  const qs = query.toString();
+  return request<Monitoring[]>(`/monitoring${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+/** ADMIN only on the backend. */
+export function getAuditLogs(
+  token: string,
+  action?: string
+): Promise<AuditLog[]> {
+  const qs = action ? `?action=${encodeURIComponent(action)}` : "";
+  return request<AuditLog[]>(`/audit-logs${qs}`, {}, token);
 }

@@ -43,7 +43,10 @@ browser will be rejected before it reaches the API — see the backend's
   enforces authorization itself (section 54) regardless of what this
   frontend does or doesn't render.
 - Pages: `/login`, `/` (dashboard), `/competitions/[id]` (fixtures),
-  `/fixtures/[id]` (Match Intelligence — the forecast detail view).
+  `/fixtures/[id]` (Match Intelligence — the forecast detail view),
+  `/models` and `/models/[version]` (Model Lab — the registry, raw
+  parameters, backtests, calibration, conformal and drift diagnostics,
+  and the rollback action; see the root README's **Model Lab** section).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -55,8 +58,12 @@ every view needs a live, authenticated API call — so Cache Components
 Verified: `npm run build` and `npm run lint` both pass; every route's
 server-rendered HTML returns `200`; and the live backend's actual JSON
 responses (login → competitions → competition detail → fixtures →
-forecast → predictions) were checked field-for-field against
-`lib/types.ts` using the mock provider. **Not verified**: the actual
-rendered UI in a real browser — no browser-automation tool was available
-in the session that built this. Open `http://localhost:3000` yourself
-and click through before trusting the visuals.
+forecast → predictions, and separately models → model detail →
+model-performance → backtests → calibration → conformal → monitoring →
+audit-logs → rollback) were checked field-for-field against
+`lib/types.ts` using the mock provider — including a real rollback,
+which actually executed and promoted a RETIRED version back to ENABLED.
+**Not verified**: the actual rendered UI in a real browser — no
+browser-automation tool was available in the session that built this.
+Open `http://localhost:3000` yourself and click through before trusting
+the visuals.
