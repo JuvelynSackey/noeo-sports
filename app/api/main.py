@@ -62,6 +62,7 @@ from app.api.schemas import (
     SimulationRunOut,
     SimulationStandingOut,
     SyncReportOut,
+    SystemEventOut,
     SystemHealthOut,
     TeamOut,
     TeamStrengthOut,
@@ -79,7 +80,7 @@ from app.database.models.enums import CompetitionStatus, ModelStatus, UserRole
 from app.database.models.fixtures import Fixture
 from app.database.models.league import LeagueParameter, TeamStrength
 from app.database.models.modeling import CalibrationResult, ConformalCalibration, ModelVersion, ModelWeight
-from app.database.models.monitoring import ModelMonitoring
+from app.database.models.monitoring import ModelMonitoring, SystemEvent
 from app.database.models.predictions import Prediction, ScenarioPrediction
 from app.database.models.quality import DataQuality
 from app.database.models.simulation import SimulationRun, SimulationStandingResult
@@ -692,6 +693,26 @@ def monitoring(
             )
         )
     return out
+
+
+@app.get("/system-events", response_model=list[SystemEventOut])
+def system_events(
+    event_type: str | None = Query(default=None),
+    severity: str | None = Query(default=None, description="INFO / WARNING / ERROR"),
+    db: Session = Depends(get_db),
+    user: User = Depends(_ADMIN_OR_ANALYST),
+) -> list[SystemEvent]:
+    """The operational event log (sections 51/53) — sync completions,
+    discovery failures, model promotions/challenger rejections, drift
+    breaches, and team promotion/relegation/arrival/departure movements,
+    recorded by the system itself with no human actor. ADMIN/ANALYST only,
+    same as /monitoring: distinct from /audit-logs, which is who-did-what."""
+    query = db.query(SystemEvent)
+    if event_type:
+        query = query.filter(SystemEvent.event_type == event_type)
+    if severity:
+        query = query.filter(SystemEvent.severity == severity)
+    return query.order_by(SystemEvent.occurred_at.desc()).limit(500).all()
 
 
 @app.get("/backtests", response_model=list[BacktestOut])

@@ -72,12 +72,17 @@ browser will be rejected before it reaches the API — see the backend's
   has no forecast yet, instead of visiting Match Intelligence one
   fixture at a time), `/live-centre` (every IN_PLAY fixture across
   every competition, polled every 15s since there's no websocket/SSE
-  channel), and `/reports` (ADMIN only: every past full sync, read back
-  from the audit log rather than a dedicated store; see the root
-  README's **Model Lab**, **Backtesting Centre**, **Admin Centre**,
-  **Scenario Lab**, **Data Intelligence**, **Teams**, **Forecast
-  Centre**, **Live Centre**, **Reports**, **Competitions**, and
-  **Synchronization report and scheduling** sections).
+  channel), `/reports` (ADMIN only: every past full sync, read back
+  from the audit log rather than a dedicated store), and
+  `/system-intelligence` (system health plus the backend's own
+  operational event log — sync completions, discovery failures, model
+  promotions/rejections, drift breaches, team movements — a new `GET
+  /system-events` endpoint this page needed, since `SystemEvent` had no
+  API exposure at all before now; see the root README's **Model Lab**,
+  **Backtesting Centre**, **Admin Centre**, **Scenario Lab**, **Data
+  Intelligence**, **Teams**, **Forecast Centre**, **Live Centre**,
+  **Reports**, **Competitions**, and **Monitoring, drift and OOD
+  detection** sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -184,6 +189,18 @@ the real response — though the mock dataset only has one status
 (`ACTIVE`), one type (`DOMESTIC_LEAGUE`) and one country
 (`Mockland`), so the filters themselves only have one real option to
 narrow by right now.
+System Intelligence needed a new backend endpoint first: `GET
+/system-events`, with a new RBAC test (`test_api_rbac.py`) covering a
+VIEWER 403, an ADMIN 200 seeded with real `SystemEvent` rows, and that
+rows return newest-first and are filterable by `severity` — full
+pytest suite (300 tests) passing after. Checked live: `GET
+/system-health` without auth; triggering a real sync and confirming it
+produced a `FULL_SYNC_COMPLETED` event among others (`MODEL_PROMOTED`,
+`COMPETITION_DISCOVERY_COMPLETED`, `MODEL_DRIFT_DETECTED` were all
+already present); both the `event_type` and `severity` filters, alone
+and combined; newest-first ordering; and that a VIEWER gets a 403
+while a freshly created ANALYST gets a 200, matching the page's own
+`canView` check.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting

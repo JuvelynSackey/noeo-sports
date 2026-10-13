@@ -281,7 +281,8 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   Admin Centre (/admin, ADMIN only), Scenario Lab (/scenarios),
                   Data Intelligence (/data-intelligence), Teams (/teams),
                   Forecast Centre (/forecast-centre), Live Centre (/live-centre),
-                  Reports (/reports, ADMIN only), Competitions (/competitions) —
+                  Reports (/reports, ADMIN only), Competitions (/competitions),
+                  System Intelligence (/system-intelligence) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -650,7 +651,17 @@ to satisfy sections 34-37.
    `model_name`, `metric_name`, `breached_only`) exposes the
    `ModelMonitoring` time series; `ood_flags` now appears alongside the
    existing `ood_status` in every forecast's `model_diagnostics`, on both
-   `POST /forecast` and `GET /predictions/{fixture}`.
+   `POST /forecast` and `GET /predictions/{fixture}`. The `SystemEvent`
+   rows this section's drift breaches (and movement detection's
+   promotions/relegations, competition discovery's failures, and the
+   champion/challenger service's promotions/rejections) all write to —
+   `__tablename__ = "system_events"`, defined alongside `ModelMonitoring`
+   in `app/database/models/monitoring.py` — had no API exposure at all
+   until the frontend's System Intelligence page needed one: `GET
+   /system-events` (filterable by `event_type`, `severity`; ADMIN/ANALYST
+   only, same gate as `/monitoring`) is the system's own operational
+   event log, distinct from `/audit-logs`, which is who-did-what rather
+   than what-the-system-itself-observed-or-decided.
 
 ### Authentication, RBAC and audit logging (Phase 10)
 
@@ -1065,16 +1076,18 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked twelve, one at
-a time — **Dashboard**, **Fixtures** (as competition detail),
+well in one pass wasn't realistic, so this phase picked thirteen, one
+at a time — **Dashboard**, **Fixtures** (as competition detail),
 **Competitions**, **Match Intelligence**, **Model Lab**, **Backtesting
 Centre**, **Admin Centre**, **Data Intelligence**, **Teams**,
-**Forecast Centre**, **Live Centre**, and **Reports** — rather than
-shipping fourteen shallow stubs. A thirteenth page, **Scenario Lab**,
-isn't one of the spec's 14 named pages at all — it's the frontend for
-Phase 13/14's Monte Carlo simulation and scenario-engine work, which
-(like those phases themselves) is beyond the original plan and had no
-UI until now.
+**Forecast Centre**, **Live Centre**, **Reports**, and **System
+Intelligence** — rather than shipping fourteen shallow stubs. A
+fourteenth page, **Scenario Lab**, isn't one of the spec's 14 named
+pages at all — it's the frontend for Phase 13/14's Monte Carlo
+simulation and scenario-engine work, which (like those phases
+themselves) is beyond the original plan and had no UI until now. Only
+**API Management** is left unbuilt, and it has no backend to build
+against at all.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1263,18 +1276,34 @@ UI until now.
    narrow yet — the page is still correctly built and tested against
    the real response shape, just not interesting to use until there's
    more variety in the data.
-14. **Data contract**: `lib/types.ts` is hand-written to mirror
+14. **System Intelligence** (`/system-intelligence`, section 24) —
+   system health (the same `GET /system-health` the Dashboard shows,
+   with a few more raw fields: database scheme, next scheduled sync)
+   plus the system's own operational event log, gated to ADMIN/ANALYST
+   client-side (everyone sees the health card; the events section shows
+   a plain explanation instead of a 403 for VIEWER/SYSTEM). The event
+   log needed a new backend endpoint: `SystemEvent` — sync completions,
+   discovery failures, model promotions/challenger rejections, drift
+   breaches, team movements, all already being written by five
+   different services (see **Monitoring, drift and OOD detection** and
+   **Synchronization report and scheduling**) — had no API exposure at
+   all before this. `GET /system-events` (filterable by `event_type`
+   and `severity`, same ADMIN/ANALYST gate as `/monitoring`) fixes
+   that. Distinct from the Admin Centre's audit log, which is
+   who-did-what; this is what the system itself observed or decided,
+   with no human actor. Drift detail and job-queue status stay in the
+   Admin Centre rather than being duplicated here.
+15. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-15. **What this doesn't do**: the other 2 pages from section 24
-   (System Intelligence, API Management) aren't built — API Management
-   has no backend to build against at all (no API-key/rate-limit
-   management exists); System Intelligence's core content (system
-   health + the competitions list) is arguably already the Dashboard in
-   substance, just not under that name. Model
+16. **What this doesn't do**: the one remaining page from section 24,
+   API Management, isn't built — it has no backend to build against at
+   all (no API-key/rate-limit management exists, and building one from
+   scratch is a materially bigger undertaking than anything else listed
+   here). Model
    Lab shows raw parameters and metrics,
    never a formal model card (section 93) — the backend doesn't persist
    purpose/limitations/approval-status fields for a model version, so
@@ -1283,7 +1312,7 @@ UI until now.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-16. **Testing**: both commands now also run in CI (see **Testing
+17. **Testing**: both commands now also run in CI (see **Testing
    hardening and production deployment**'s **CI** sub-point) on every
    push/PR, alongside the backend's pytest job. `npm run build` and
    `npm run lint` both pass; every
@@ -1349,6 +1378,16 @@ UI until now.
    logic run against the real response — the mock dataset only has one
    status/type/country right now, so the filters have nothing to
    actually narrow yet, but the shape and logic are confirmed correct.
+   System Intelligence needed a new backend endpoint first:
+   `GET /system-events`, with a new RBAC test seeding real `SystemEvent`
+   rows and covering a VIEWER 403, an ADMIN 200, newest-first ordering,
+   and the `severity` filter — full pytest suite (300 tests) passing
+   after. Checked live: `GET /system-health` with no auth; a real sync
+   confirmed to produce a `FULL_SYNC_COMPLETED` event among others
+   already present (`MODEL_PROMOTED`, `COMPETITION_DISCOVERY_COMPLETED`,
+   `MODEL_DRIFT_DETECTED`); both filters alone and combined; and that a
+   VIEWER gets 403 while a freshly created ANALYST gets 200, matching
+   the page's own role gate.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1371,7 +1410,7 @@ UI until now.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions** — done (beyond the original 12-phase plan; 12 of 14 named pages, plus Scenario Lab as a 13th, unnamed page)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions, System Intelligence** — done (beyond the original 12-phase plan; 13 of 14 named pages, plus Scenario Lab as a 14th, unnamed page — only API Management remains, with no backend to build against)
 
 ## Safety & integrity
 

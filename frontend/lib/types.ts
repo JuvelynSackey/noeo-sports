@@ -335,6 +335,14 @@ export interface Monitoring {
   evaluated_at: string;
 }
 
+export interface SystemEvent {
+  event_type: string;
+  severity: string;
+  message: string;
+  context: Record<string, unknown> | null;
+  occurred_at: string;
+}
+
 export interface AuditLog {
   actor_email: string | null;
   actor_role: string | null;

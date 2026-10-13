@@ -233,6 +233,22 @@ class MonitoringOut(BaseModel):
     evaluated_at: dt.datetime
 
 
+class SystemEventOut(BaseModel):
+    """The operational event log (sections 51/53) — sync completions,
+    discovery failures, model promotions/rejections, drift breaches, and
+    promotion/relegation movements all record one of these. Distinct from
+    AuditLog, which is who-did-what (section 54); this is what the system
+    itself observed or decided, with no human actor."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    event_type: str
+    severity: str
+    message: str
+    context: dict | None
+    occurred_at: dt.datetime
+
+
 class BacktestOut(BaseModel):
     """Full walk-forward backtest detail (sections 35-36), including the
     section-36 diagnostics that don't fit the summary /model-performance

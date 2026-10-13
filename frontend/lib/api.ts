@@ -24,6 +24,7 @@ import type {
   Scenario,
   SimulationRun,
   SyncReport,
+  SystemEvent,
   SystemHealth,
   Team,
   TeamStrength,
@@ -316,6 +317,21 @@ export function getAuditLogs(
   if (params.actor_email) query.set("actor_email", params.actor_email);
   const qs = query.toString();
   return request<AuditLog[]>(`/audit-logs${qs ? `?${qs}` : ""}`, {}, token);
+}
+
+/** ADMIN/ANALYST only on the backend, same as `getMonitoring`. The
+ * system's own operational event log (sync completions, discovery
+ * failures, model promotions/rejections, drift breaches, team movements)
+ * — distinct from `getAuditLogs`, which is who-did-what. */
+export function getSystemEvents(
+  token: string,
+  params: { event_type?: string; severity?: string } = {}
+): Promise<SystemEvent[]> {
+  const query = new URLSearchParams();
+  if (params.event_type) query.set("event_type", params.event_type);
+  if (params.severity) query.set("severity", params.severity);
+  const qs = query.toString();
+  return request<SystemEvent[]>(`/system-events${qs ? `?${qs}` : ""}`, {}, token);
 }
 
 // --- Admin Centre (sections 19/72) ---

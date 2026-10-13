@@ -14,6 +14,7 @@ from app.api.main import app
 from app.database.base import Base, get_db
 from app.database.models.audit import AuditLog, User
 from app.database.models.enums import UserRole
+from app.database.models.monitoring import SystemEvent
 from app.services.auth import hash_password
 
 
@@ -108,6 +109,7 @@ def test_viewer_is_forbidden_from_monitoring_and_raw_model_params(client):
     token = _token(client, "viewer@example.com", "viewerpass")
     assert client.get("/monitoring", headers=_auth(token)).status_code == 403
     assert client.get("/models/nonexistent-version", headers=_auth(token)).status_code == 403
+    assert client.get("/system-events", headers=_auth(token)).status_code == 403
 
 
 def test_viewer_is_forbidden_from_sync_and_user_management(client):
@@ -126,6 +128,28 @@ def test_admin_can_reach_monitoring(client):
     token = _token(client, "admin@example.com", "adminpass")
     r = client.get("/monitoring", headers=_auth(token))
     assert r.status_code == 200
+
+
+def test_admin_can_reach_system_events_newest_first_and_filterable(client):
+    session = client.session_factory()
+    session.add(SystemEvent(event_type="FULL_SYNC_COMPLETED", severity="INFO", message="ok"))
+    session.add(SystemEvent(event_type="MODEL_DRIFT_DETECTED", severity="WARNING", message="drifted"))
+    session.commit()
+    session.close()
+
+    token = _token(client, "admin@example.com", "adminpass")
+    r = client.get("/system-events", headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 2
+    assert body[0]["event_type"] == "MODEL_DRIFT_DETECTED"  # most recently inserted, occurred_at desc
+    for key in ("event_type", "severity", "message", "context", "occurred_at"):
+        assert key in body[0]
+
+    filtered = client.get("/system-events?severity=WARNING", headers=_auth(token))
+    assert filtered.status_code == 200
+    assert len(filtered.json()) == 1
+    assert filtered.json()[0]["event_type"] == "MODEL_DRIFT_DETECTED"
 
 
 def test_admin_can_create_user_and_it_is_audit_logged(client):

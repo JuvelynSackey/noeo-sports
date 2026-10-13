@@ -13,6 +13,7 @@ const NAV_LINKS = [
   { href: "/scenarios", label: "Scenario Lab" },
   { href: "/data-intelligence", label: "Data Intelligence" },
   { href: "/teams", label: "Teams" },
+  { href: "/system-intelligence", label: "System Intelligence" },
 ];
 
 const ADMIN_NAV_LINKS = [
