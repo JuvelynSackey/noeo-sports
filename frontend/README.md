@@ -78,11 +78,18 @@ browser will be rejected before it reaches the API — see the backend's
   operational event log — sync completions, discovery failures, model
   promotions/rejections, drift breaches, team movements — a new `GET
   /system-events` endpoint this page needed, since `SystemEvent` had no
-  API exposure at all before now; see the root README's **Model Lab**,
+  API exposure at all before now), and `/api-management` (self-service
+  API keys — `X-API-Key` as a long-lived alternative to the short-lived
+  JWT this app itself uses, for scripts/external integrations; a key
+  acts with its owning user's current role and is rate limited per key.
+  Anyone creates their own; ADMIN additionally sees and can revoke
+  every key, not just their own. The plaintext key is shown exactly
+  once, at creation; see the root README's **Model Lab**,
   **Backtesting Centre**, **Admin Centre**, **Scenario Lab**, **Data
   Intelligence**, **Teams**, **Forecast Centre**, **Live Centre**,
-  **Reports**, **Competitions**, and **Monitoring, drift and OOD
-  detection** sections).
+  **Reports**, **Competitions**, **Monitoring, drift and OOD
+  detection**, and **Authentication, RBAC and audit logging**
+  sections).
 
 Every page is a Client Component. There's no static shell to speak of —
 every view needs a live, authenticated API call — so Cache Components
@@ -201,6 +208,22 @@ already present); both the `event_type` and `severity` filters, alone
 and combined; newest-first ordering; and that a VIEWER gets a 403
 while a freshly created ANALYST gets a 200, matching the page's own
 `canView` check.
+API Management needed the largest backend change of any frontend page
+so far: a new `ApiKey` model/table, `app/services/api_keys.py`, and
+`get_current_user` accepting `X-API-Key` as well as a bearer token —
+with a new, dedicated test file (`test_api_keys.py`, 11 tests) covering
+self-service creation, role inheritance through `X-API-Key` (a
+VIEWER's key still 403s on ADMIN-only endpoints; an ADMIN's key reaches
+them), malformed/wrong keys, revocation, deactivating the owning user
+also blocking their key, list scoping (own keys vs. ADMIN's
+every-key view), update ownership (403 for a non-owner, 200 for the
+owner or ADMIN), usage tracking, and rate limiting — full pytest suite
+(311 tests) passing after. Checked live end-to-end against the running
+backend: created a real key, used its plaintext value as `X-API-Key`
+to reach both a read-only and (for the ADMIN-owned key) an ADMIN-only
+endpoint, confirmed usage tracking incremented and `last_used_at` was
+set, revoked the key and confirmed it then 401s, and confirmed a
+VIEWER's own key list excludes the ADMIN's key.
 **Not verified**: the actual rendered UI in a real browser — no
 browser-automation tool was available in the session that built this.
 Open `http://localhost:3000` yourself and click through before trusting

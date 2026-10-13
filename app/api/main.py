@@ -8,7 +8,9 @@ it), a full-sync trigger, and authentication/RBAC/audit logging (section
 background full-sync on a fixed interval (section 13/64).
 
 Every endpoint below requires a valid bearer token except `/system-health`
-and `POST /auth/token` itself. Administrator-only actions (raw model
+and `POST /auth/token` itself — or, as of section 24's "API Management",
+an `X-API-Key` header instead of a token (see `app/api/deps.py`), issued
+and managed via `/api-keys`. Administrator-only actions (raw model
 parameters, drift monitoring, `/sync`, user management, audit logs) further
 require the ADMIN or ANALYST role via `require_roles` — see `app/api/deps.py`.
 """
@@ -29,6 +31,10 @@ from app.api.deps import get_current_user, require_roles
 from app.api.middleware import RequestLoggingMiddleware
 from app.api.schemas import (
     AdministratorNotesOut,
+    ApiKeyCreatedOut,
+    ApiKeyCreateIn,
+    ApiKeyOut,
+    ApiKeyUpdateIn,
     AuditLogOut,
     BacktestOut,
     CalibrationDiagnosticOut,
@@ -74,6 +80,7 @@ from app.api.schemas import (
 from app.config import APP_VERSION, get_settings
 from app.data.providers import get_provider
 from app.database.base import get_db
+from app.database.models.api_keys import ApiKey
 from app.database.models.audit import AuditLog, User
 from app.database.models.competitions import Competition, Season
 from app.database.models.enums import CompetitionStatus, ModelStatus, UserRole
@@ -88,6 +95,7 @@ from app.database.models.teams import Team
 from app.forecasting.score_matrix import most_probable_scorelines
 from app.logging_config import configure_logging, get_logger
 from app.services import model_version_registry
+from app.services.api_keys import generate_api_key
 from app.services.audit import record_audit
 from app.services.auth import authenticate_user, create_access_token, hash_password
 from app.services.cache import get_cache
@@ -302,6 +310,83 @@ def update_user(
         record_audit(db, actor, "UPDATE_USER", resource_type="user", resource_id=str(user.id), details=changes)
     db.commit()
     return user
+
+
+def _to_api_key_out(api_key: ApiKey, owner: User) -> ApiKeyOut:
+    return ApiKeyOut(
+        id=api_key.id,
+        key_id=api_key.key_id,
+        name=api_key.name,
+        owner_email=owner.email,
+        role=owner.role.value if hasattr(owner.role, "value") else str(owner.role),
+        is_active=api_key.is_active,
+        request_count=api_key.request_count,
+        last_used_at=api_key.last_used_at,
+        created_at=api_key.created_at,
+    )
+
+
+@app.post("/api-keys", response_model=ApiKeyCreatedOut, status_code=201)
+def create_api_key(
+    payload: ApiKeyCreateIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)
+) -> ApiKeyCreatedOut:
+    """Issues a new API key for the caller's own account (section 24's
+    "API Management") — self-service, like a personal access token, not
+    ADMIN-gated: any authenticated role may mint one for themselves. The
+    key acts with the caller's own current role via `X-API-Key` on any
+    other endpoint, rate limited per key (`settings.api_key_rate_limit_*`,
+    independent of the caller's own JWT usage). The plaintext key is
+    returned exactly once, here; only its bcrypt hash is ever persisted,
+    so a lost key can't be recovered — revoke it (`PATCH
+    /api-keys/{key_id}`) and mint a new one instead."""
+    api_key, plaintext = generate_api_key(db, user_id=actor.id, name=payload.name)
+    record_audit(db, actor, "CREATE_API_KEY", resource_type="api_key", resource_id=api_key.key_id, details={"name": payload.name})
+    db.commit()
+    base = _to_api_key_out(api_key, actor)
+    return ApiKeyCreatedOut(**base.model_dump(), api_key=plaintext)
+
+
+@app.get("/api-keys", response_model=list[ApiKeyOut])
+def list_api_keys(db: Session = Depends(get_db), actor: User = Depends(get_current_user)) -> list[ApiKeyOut]:
+    """Every role lists their OWN keys; ADMIN additionally sees every
+    key, for the same administrative-oversight reason `/users` and
+    `/audit-logs` are ADMIN-visible. Never the secret — only metadata and
+    the usage counters `X-API-Key` requests increment."""
+    query = db.query(ApiKey, User).join(User, ApiKey.user_id == User.id)
+    if actor.role != UserRole.ADMIN:
+        query = query.filter(ApiKey.user_id == actor.id)
+    return [_to_api_key_out(api_key, owner) for api_key, owner in query.order_by(ApiKey.created_at.desc()).all()]
+
+
+@app.patch("/api-keys/{key_id}", response_model=ApiKeyOut)
+def update_api_key(
+    key_id: str, payload: ApiKeyUpdateIn, db: Session = Depends(get_db), actor: User = Depends(get_current_user)
+) -> ApiKeyOut:
+    """Revoke (`is_active=false`, reversible — unlike a user account this
+    project never deletes a key either) or rename a key. The owning user
+    or ADMIN only; `key_id` is a 64-bit random value, not a guessable
+    small space like an email, so a 403-for-someone-else's-key vs.
+    404-for-no-such-key distinction isn't the enumeration risk it would
+    be elsewhere in this API."""
+    api_key = db.query(ApiKey).filter_by(key_id=key_id).first()
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    if api_key.user_id != actor.id and actor.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Not your API key")
+
+    changes: dict = {}
+    if payload.name is not None:
+        api_key.name = payload.name
+        changes["name"] = payload.name
+    if payload.is_active is not None:
+        api_key.is_active = payload.is_active
+        changes["is_active"] = payload.is_active
+
+    if changes:
+        record_audit(db, actor, "UPDATE_API_KEY", resource_type="api_key", resource_id=api_key.key_id, details=changes)
+    db.commit()
+    owner = db.get(User, api_key.user_id)
+    return _to_api_key_out(api_key, owner)
 
 
 @app.get("/audit-logs", response_model=list[AuditLogOut])

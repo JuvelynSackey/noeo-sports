@@ -6,6 +6,8 @@
 // (e.g. "no ENABLED dixon_coles model for this competition").
 
 import type {
+  ApiKey,
+  ApiKeyCreated,
   AuditLog,
   Backtest,
   Calibration,
@@ -362,6 +364,37 @@ export function updateUser(
 ): Promise<User> {
   return request<User>(
     `/users/${userId}`,
+    { method: "PATCH", body: JSON.stringify(payload) },
+    token
+  );
+}
+
+// --- API Management (section 24) ---
+
+/** Any authenticated role — self-service, like a personal access token.
+ * The plaintext key is only ever present in this one response; it can't
+ * be retrieved again afterward. */
+export function createApiKey(name: string, token: string): Promise<ApiKeyCreated> {
+  return request<ApiKeyCreated>(
+    "/api-keys",
+    { method: "POST", body: JSON.stringify({ name }) },
+    token
+  );
+}
+
+/** Any authenticated role sees their own keys; ADMIN sees every key. */
+export function listApiKeys(token: string): Promise<ApiKey[]> {
+  return request<ApiKey[]>("/api-keys", {}, token);
+}
+
+/** The owning user or ADMIN only on the backend. */
+export function updateApiKey(
+  keyId: string,
+  payload: { name?: string; is_active?: boolean },
+  token: string
+): Promise<ApiKey> {
+  return request<ApiKey>(
+    `/api-keys/${encodeURIComponent(keyId)}`,
     { method: "PATCH", body: JSON.stringify(payload) },
     token
   );

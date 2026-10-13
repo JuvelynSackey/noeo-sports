@@ -14,6 +14,7 @@ const NAV_LINKS = [
   { href: "/data-intelligence", label: "Data Intelligence" },
   { href: "/teams", label: "Teams" },
   { href: "/system-intelligence", label: "System Intelligence" },
+  { href: "/api-management", label: "API Management" },
 ];
 
 const ADMIN_NAV_LINKS = [

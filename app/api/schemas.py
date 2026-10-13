@@ -484,6 +484,34 @@ class AuditLogOut(BaseModel):
     occurred_at: dt.datetime
 
 
+class ApiKeyCreateIn(BaseModel):
+    name: str
+
+
+class ApiKeyUpdateIn(BaseModel):
+    name: str | None = None
+    is_active: bool | None = None
+
+
+class ApiKeyOut(BaseModel):
+    """Never the secret itself — only `POST /api-keys`'s one-time response
+    (`ApiKeyCreatedOut`) ever carries that."""
+
+    id: int
+    key_id: str
+    name: str
+    owner_email: str
+    role: str
+    is_active: bool
+    request_count: int
+    last_used_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class ApiKeyCreatedOut(ApiKeyOut):
+    api_key: str
+
+
 class SimulationStandingOut(BaseModel):
     team_canonical_id: str
     mean_points: float

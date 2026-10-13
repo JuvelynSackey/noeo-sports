@@ -1,4 +1,5 @@
 """Import every model module so Base.metadata / Alembic autogenerate sees all tables."""
+from app.database.models.api_keys import ApiKey  # noqa: F401
 from app.database.models.audit import AuditLog, User  # noqa: F401
 from app.database.models.competitions import Competition, Season  # noqa: F401
 from app.database.models.fixtures import Fixture, MatchStatistic, Result, XGData  # noqa: F401

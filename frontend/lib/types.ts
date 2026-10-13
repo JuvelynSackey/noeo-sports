@@ -335,6 +335,22 @@ export interface Monitoring {
   evaluated_at: string;
 }
 
+export interface ApiKey {
+  id: number;
+  key_id: string;
+  name: string;
+  owner_email: string;
+  role: string;
+  is_active: boolean;
+  request_count: number;
+  last_used_at: string | null;
+  created_at: string;
+}
+
+export interface ApiKeyCreated extends ApiKey {
+  api_key: string;
+}
+
 export interface SystemEvent {
   event_type: string;
   severity: string;

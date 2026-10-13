@@ -244,6 +244,9 @@ app/
     auth.py                     password hashing (bcrypt) + JWT issuance/verification (section 54)
     audit.py                     append-only AuditLog writer for sensitive administrative actions
     rate_limiter.py              in-memory sliding-window limiter behind POST /auth/token
+                                 and (Phase 16) X-API-Key requests, independently per key
+    api_keys.py                  API key generation/verification (section 24's "API
+                                 Management") — bcrypt-hashed secret, indexed key_id lookup
     cache.py                     Redis-backed cache (section 22 of the follow-on spec) — a
                                  no-op when REDIS_URL isn't set, never the source of truth
     job_queue.py                  local async job queue (section 74): Redis LPUSH/BRPOP, with
@@ -282,7 +285,8 @@ frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   Data Intelligence (/data-intelligence), Teams (/teams),
                   Forecast Centre (/forecast-centre), Live Centre (/live-centre),
                   Reports (/reports, ADMIN only), Competitions (/competitions),
-                  System Intelligence (/system-intelligence) —
+                  System Intelligence (/system-intelligence),
+                  API Management (/api-management) —
                   every page is a Client Component; Cache Components is off
                   (next.config.ts), since there's no static shell for an
                   authenticated, API-driven app
@@ -708,6 +712,29 @@ to satisfy sections 34-37.
    note that `passlib` 1.7.4 is unmaintained and misdetects `bcrypt>=4.1`
    as buggy (it probes a `bcrypt.__about__` module that newer bcrypt
    removed), so `requirements.txt` pins `bcrypt==4.0.1`.
+6. **API keys** (`app/database/models/api_keys.py`, `app/services/
+   api_keys.py`, section 24's "API Management" — added much later,
+   alongside the frontend page of the same name, Phase 16) — a long-lived
+   alternative to the short-lived JWT, for programmatic/non-interactive
+   callers. `app/api/deps.py::get_current_user` accepts an `X-API-Key`
+   header as well as a bearer token; a key acts with its owning user's
+   own *current* role (not a snapshot taken at creation, so a role change
+   or deactivation takes effect on existing keys immediately, same as a
+   JWT) and is rate limited per key (`settings.api_key_rate_limit_*`),
+   independent of whatever else that user's JWT is doing. A presented key
+   is `{key_id}.{secret}` — `key_id` is an indexed, non-secret lookup
+   column; `secret` is bcrypt-hashed, same discipline as a password,
+   verified in one indexed query plus one hash check rather than a scan.
+   `POST /api-keys` is self-service — any authenticated role can mint one
+   for themselves, returning the plaintext key exactly once (only its
+   hash is ever persisted); `GET /api-keys` lists the caller's own keys
+   (ADMIN sees every key, like `/audit-logs`); `PATCH /api-keys/{key_id}`
+   revokes (`is_active=false`, reversible) or renames one, the owning
+   user or ADMIN only. Every create/update is audit-logged
+   (`CREATE_API_KEY`/`UPDATE_API_KEY`). This is the feature that makes
+   the earlier note about `SYSTEM` needing "no token today" dated — a
+   service account could now be issued a key like anyone else, though
+   nothing in this project actually provisions one yet.
 
 ### Champion/challenger deployment and rollback (Phase 11)
 
@@ -1076,18 +1103,23 @@ The build specification's section 24 names roughly 14 pages (Dashboard,
 Live Centre, Fixtures, Match Intelligence, Competitions, Teams, Forecast
 Centre, Model Lab, Backtesting Centre, Data Intelligence, System
 Intelligence, Admin Centre, Reports, API Management). Building all of them
-well in one pass wasn't realistic, so this phase picked thirteen, one
-at a time — **Dashboard**, **Fixtures** (as competition detail),
-**Competitions**, **Match Intelligence**, **Model Lab**, **Backtesting
-Centre**, **Admin Centre**, **Data Intelligence**, **Teams**,
-**Forecast Centre**, **Live Centre**, **Reports**, and **System
-Intelligence** — rather than shipping fourteen shallow stubs. A
-fourteenth page, **Scenario Lab**, isn't one of the spec's 14 named
-pages at all — it's the frontend for Phase 13/14's Monte Carlo
-simulation and scenario-engine work, which (like those phases
-themselves) is beyond the original plan and had no UI until now. Only
-**API Management** is left unbuilt, and it has no backend to build
-against at all.
+well in one pass wasn't realistic, so this phase ultimately built all
+fourteen, one at a time — **Dashboard**, **Fixtures** (as competition
+detail), **Competitions**, **Match Intelligence**, **Model Lab**,
+**Backtesting Centre**, **Admin Centre**, **Data Intelligence**,
+**Teams**, **Forecast Centre**, **Live Centre**, **Reports**, **System
+Intelligence**, and finally **API Management** — rather than shipping
+fourteen shallow stubs along the way. A fifteenth page, **Scenario
+Lab**, isn't one of the spec's 14 named pages at all — it's the
+frontend for Phase 13/14's Monte Carlo simulation and scenario-engine
+work, which (like those phases themselves) is beyond the original plan
+and had no UI until now. API Management was the one page with no
+backend to build against — section 24's spec doesn't define what
+"API Management" means beyond the name, so the scope decided here
+(API keys as a long-lived `X-API-Key` alternative to the JWT, rate
+limited per key, self-service with ADMIN oversight) is this build's
+own interpretation, not a requirement read out of a spec that doesn't
+say more.
 
 1. **Stack**: Next.js (App Router) + TypeScript + Tailwind + Recharts, per
    the spec's own section 24. Lives in `frontend/`, a separate npm
@@ -1293,26 +1325,40 @@ against at all.
    who-did-what; this is what the system itself observed or decided,
    with no human actor. Drift detail and job-queue status stay in the
    Admin Centre rather than being duplicated here.
-15. **Data contract**: `lib/types.ts` is hand-written to mirror
+15. **API Management** (`/api-management`, section 24) — open to any
+   authenticated role, self-service: create/list/revoke your own API
+   keys, with ADMIN additionally seeing and revoking every key (same
+   oversight pattern as `/users` and `/audit-logs`). This needed the
+   backend to grow a second auth mechanism entirely — see the root
+   README's **Authentication, RBAC and audit logging** section for
+   `X-API-Key`, the new `ApiKey` model, and the per-key rate limit — the
+   biggest backend change any frontend page in this project has
+   triggered. The plaintext key is shown exactly once, right after
+   creation, in a dismissible banner; after that only its metadata and
+   usage counters (`request_count`, `last_used_at`) are ever visible
+   again, never the secret itself.
+16. **Data contract**: `lib/types.ts` is hand-written to mirror
    `app/api/schemas.py`, not generated from the backend's OpenAPI schema —
    a natural follow-up. Verified field-for-field against the live mock
    provider's actual responses while building this (see **Testing**
    below), but there's no automated check keeping the two in sync going
    forward; a backend schema change won't fail a frontend build today.
-16. **What this doesn't do**: the one remaining page from section 24,
-   API Management, isn't built — it has no backend to build against at
-   all (no API-key/rate-limit management exists, and building one from
-   scratch is a materially bigger undertaking than anything else listed
-   here). Model
+17. **What this doesn't do**: every page from section 24's own list is
+   now built. Model
    Lab shows raw parameters and metrics,
    never a formal model card (section 93) — the backend doesn't persist
    purpose/limitations/approval-status fields for a model version, so
-   there's nothing to render there honestly. There's no i18n/RTL (section
+   there's nothing to render there honestly. API keys have no expiry —
+   only the manual revoke toggle — and there's no dedicated
+   brute-force limiter on *failed* key attempts (only on successful
+   usage volume), since a 256-bit random secret makes that a different,
+   much weaker threat model than a human-guessable password. There's no
+   i18n/RTL (section
    85), no timezone preference beyond the browser's own (section 84 —
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-17. **Testing**: both commands now also run in CI (see **Testing
+18. **Testing**: both commands now also run in CI (see **Testing
    hardening and production deployment**'s **CI** sub-point) on every
    push/PR, alongside the backend's pytest job. `npm run build` and
    `npm run lint` both pass; every
@@ -1388,6 +1434,20 @@ against at all.
    `MODEL_DRIFT_DETECTED`); both filters alone and combined; and that a
    VIEWER gets 403 while a freshly created ANALYST gets 200, matching
    the page's own role gate.
+   API Management needed the largest backend change of any frontend
+   page in this project: a new `ApiKey` model/table and
+   `get_current_user` accepting `X-API-Key` alongside the bearer token,
+   with a new, dedicated test file (`test_api_keys.py`, 11 tests)
+   covering self-service creation, role inheritance through
+   `X-API-Key` (a VIEWER's key still 403s on ADMIN-only endpoints; an
+   ADMIN's key reaches them), malformed/wrong keys, revocation,
+   deactivating the owning user also blocking their key, list scoping,
+   update ownership, usage tracking, and rate limiting — full pytest
+   suite (311 tests) passing after. Checked live end-to-end: created a
+   real key, used its plaintext value as `X-API-Key` to reach both a
+   read-only and an ADMIN-only endpoint, confirmed usage tracking and
+   `last_used_at`, revoked it and confirmed the subsequent 401, and
+   confirmed a VIEWER's own key list excludes the ADMIN's key.
    **Not verified**: the actual rendered UI in a
    real browser — no browser-automation tool was available in the
    environment that built this, so the visual result has not been seen,
@@ -1410,7 +1470,7 @@ against at all.
 13. **Monte Carlo season simulation + conformal uncertainty** — done (beyond the original 12-phase plan)
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
-16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions, System Intelligence** — done (beyond the original 12-phase plan; 13 of 14 named pages, plus Scenario Lab as a 14th, unnamed page — only API Management remains, with no backend to build against)
+16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions, System Intelligence, API Management** — done (beyond the original 12-phase plan; all 14 of section 24's named pages built, plus Scenario Lab as a 15th, unnamed one; API Management needed a new backend auth mechanism — `X-API-Key` keys alongside the JWT — built alongside it)
 
 ## Safety & integrity
 

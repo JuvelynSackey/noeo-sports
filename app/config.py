@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 60
 
+    # API key management (section 24) — a long-lived alternative to the
+    # short-lived JWT a human login issues, for programmatic callers. Rate
+    # limited per key (not per owning user) with the same single-process,
+    # in-memory RateLimiter as the login limit above, for the same reason.
+    api_key_rate_limit_requests: int = 120
+    api_key_rate_limit_window_seconds: int = 60
+
     # Data quality thresholds (section 14/15) — defaults, tunable per deployment
     min_data_quality_for_full_ensemble: float = 0.75
     min_data_quality_for_forecast: float = 0.40
