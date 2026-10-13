@@ -270,8 +270,8 @@ tests/            pytest suite (providers, discovery, team mapping, fixture sync
                   scenario engine, scenario/shock API, Redis cache, async
                   job queue, job handlers, job/cache API, DB constraints)
 
-.github/workflows/tests.yml   CI: installs requirements.txt and runs pytest on
-                               every push/PR to main (Phase 12)
+.github/workflows/tests.yml   CI: pytest job (Phase 12) and a frontend build+lint
+                               job (Phase 16), in parallel, every push/PR to main
 
 frontend/         Next.js (App Router, TypeScript, Tailwind) client (Phase 16)
                   — see frontend/README.md and this file's own Frontend section
@@ -768,10 +768,14 @@ still promoted immediately on every retrain.
 
 1. **CI** (`.github/workflows/tests.yml`) — every push and pull request
    against `main` installs `requirements.txt` and runs the full pytest
-   suite (203+ tests) against the mock provider, so a regression is caught
+   suite (299+ tests) against the mock provider, so a regression is caught
    before it merges rather than discovered later. This is the first point
    in the project where tests run anywhere other than a developer's own
-   machine.
+   machine. A second job (added alongside the frontend, Phase 16) runs in
+   parallel: `npm ci` (from `frontend/package-lock.json`), `npm run
+   build`, and `npm run lint` — the same three commands used to verify
+   every frontend page in this project by hand, now run automatically
+   instead of only when someone remembers to.
 2. **Startup safety check** (`app/api/main.py::_check_production_safety`,
    run from the FastAPI `lifespan`) — refuses to start if
    `ENVIRONMENT=production` and `SECRET_KEY` is still the insecure
@@ -1279,7 +1283,10 @@ UI until now.
    kickoff times render in whatever timezone the viewer's browser is in),
    and no real NOEO SPORTS logo asset (just a typographic wordmark) since
    none was supplied.
-16. **Testing**: `npm run build` and `npm run lint` both pass; every
+16. **Testing**: both commands now also run in CI (see **Testing
+   hardening and production deployment**'s **CI** sub-point) on every
+   push/PR, alongside the backend's pytest job. `npm run build` and
+   `npm run lint` both pass; every
    route's server-rendered HTML returns `200`; and the live backend's
    actual JSON responses were checked field-for-field against
    `lib/types.ts` against the mock provider, across four full walks:

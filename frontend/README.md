@@ -86,6 +86,17 @@ every view needs a live, authenticated API call — so Cache Components
 
 ## Testing status
 
+Both `npm run build` and `npm run lint` now also run in CI
+(`.github/workflows/tests.yml`, a `frontend` job alongside the
+backend's existing `pytest` one) on every push and pull request against
+`main` — previously only run by hand. `npm ci` surfaces 5 high-severity
+`npm audit` findings, all transitive through `eslint-config-next`'s own
+`braces`/`micromatch`/`fast-glob` dependency chain (dev-tooling only,
+never shipped to the browser); `npm audit fix --force` would downgrade
+`eslint-config-next` to a version incompatible with this project's
+actual Next.js 16.4.0, so it's left as a known, accepted advisory
+rather than "fixed" into a broken lint setup.
+
 Verified: `npm run build` and `npm run lint` both pass; every route's
 server-rendered HTML returns `200`; and the live backend's actual JSON
 responses (login → competitions → competition detail → fixtures →
