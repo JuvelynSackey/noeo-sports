@@ -98,6 +98,22 @@ class Settings(BaseSettings):
     xg_model_min_matches: int = 10
     first_half_model_min_matches: int = 10
 
+    # Gradient-boosted decision tree goal models (XGBoost, LightGBM,
+    # CatBoost) — a discriminative alternative family alongside the
+    # Dixon-Coles/Poisson MLE family, trained on that competition's own
+    # dixon_coles attack/defence/home-advantage fit as its only features
+    # (see app/models/gbdt_model.py). A higher match-count threshold than
+    # the MLE family's own min_matches_for_model_fit, since a tree
+    # ensemble has more capacity to overfit a small sample than a
+    # ~2N+1-parameter MLE does. One shared hyperparameter set translates
+    # to all three libraries' own kwarg names identically (confirmed:
+    # xgboost/lightgbm's sklearn APIs and catboost's sklearn wrapper all
+    # accept n_estimators/max_depth/learning_rate).
+    gbdt_min_matches: int = 60
+    gbdt_n_estimators: int = 100
+    gbdt_max_depth: int = 3
+    gbdt_learning_rate: float = 0.1
+
     # Walk-forward backtesting (section 35) — the source of out-of-sample
     # predictions for both ensemble weight learning and calibration fitting.
     # Expanding window: train on everything up to a point, predict the next

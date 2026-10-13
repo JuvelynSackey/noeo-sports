@@ -40,19 +40,34 @@ from app.evaluation.metrics import (
 )
 from app.forecasting.score_matrix import build_score_matrix, expected_goals_from_matrix, outcome_probabilities
 from app.logging_config import get_logger
+from app.models.gbdt_model import GBDTMatchRecord, GBDTModel
 from app.models.goal_model import GoalMatchRecord, GoalModel
 from app.services.hierarchical_shrinkage import shrink_fit
 
 logger = get_logger(__name__)
 
-# (model_name, use_dc_adjustment) — the goal-based candidates backtested,
-# ensembled, and calibrated together. Corners/cards/first-half/xG predict
-# different markets entirely and aren't part of this pool.
+# (model_name, use_dc_adjustment) — the goal-based MLE candidates
+# backtested, ensembled, and calibrated together. Corners/cards/first-half/
+# xG predict different markets entirely and aren't part of this pool.
 CANDIDATES: list[tuple[str, bool]] = [
     ("dixon_coles", True),
     ("poisson_baseline", False),
     ("hierarchical_model", True),
 ]
+
+# (model_name, library) — the discriminative GBDT candidates, backtested,
+# ensembled, and calibrated in the same pool as CANDIDATES above (see
+# app/models/gbdt_model.py for why these are a second family rather than
+# more entries in CANDIDATES: each fold needs its own freshly-fit
+# dixon_coles anchor to build features from, which the MLE-only loop in
+# `run()` doesn't do).
+GBDT_CANDIDATES: list[tuple[str, str]] = [
+    ("xgboost_model", "xgboost"),
+    ("lightgbm_model", "lightgbm"),
+    ("catboost_model", "catboost"),
+]
+
+ALL_CANDIDATE_NAMES: list[str] = [name for name, _ in CANDIDATES] + [name for name, _ in GBDT_CANDIDATES]
 
 
 @dataclass(frozen=True)
@@ -94,8 +109,17 @@ class BacktestingService:
         self.settings = settings or get_settings()
 
     def run_all(self, competition: Competition, candidates: list[tuple[str, bool]] | None = None) -> dict[str, BacktestReport]:
+        use_defaults = candidates is None
         candidates = candidates if candidates is not None else CANDIDATES
-        return {model_name: self.run(competition, model_name, use_dc) for model_name, use_dc in candidates}
+        reports = {model_name: self.run(competition, model_name, use_dc) for model_name, use_dc in candidates}
+        if use_defaults:
+            # Only pull in the GBDT pool when the caller didn't pass its own
+            # explicit candidate list (e.g. a test isolating the MLE family)
+            # — an explicit list, even one that happens to equal CANDIDATES,
+            # means the caller wants exactly that and nothing more.
+            for model_name, library in GBDT_CANDIDATES:
+                reports[model_name] = self.run_gbdt(competition, model_name, library)
+        return reports
 
     def run(self, competition: Competition, model_name: str, use_dc_adjustment: bool) -> BacktestReport:
         report = BacktestReport(competition_canonical_id=competition.canonical_competition_id, model_name=model_name, completed=False)
@@ -194,6 +218,133 @@ class BacktestingService:
 
             start = fold_end
 
+        return self._finalize_report(report, competition, model_name, predictions, n_folds)
+
+    def run_gbdt(self, competition: Competition, model_name: str, library: str) -> BacktestReport:
+        """Walk-forward backtest for a GBDT candidate (see
+        `app/models/gbdt_model.py`) — same expanding-window fold structure
+        as `run()`, but each fold fits a fresh `dixon_coles` anchor first
+        (the GBDT's only source of features) and then the GBDT itself on
+        that same fold's training window, before predicting the fold's
+        matches exactly like `run()` does (`build_score_matrix` works
+        unchanged for a `(GBDTModel, GBDTModelFit)` pair — same call
+        signature as `(GoalModel, GoalModelFit)`)."""
+        report = BacktestReport(competition_canonical_id=competition.canonical_competition_id, model_name=model_name, completed=False)
+
+        completed_matches = (
+            self.db.query(Fixture, Result)
+            .join(Result, Result.fixture_id == Fixture.id)
+            .filter(
+                Fixture.competition_id == competition.id,
+                Fixture.status == FixtureStatus.COMPLETED,
+                Fixture.kickoff_utc.isnot(None),
+            )
+            .order_by(Fixture.kickoff_utc)
+            .all()
+        )
+
+        n = len(completed_matches)
+        initial_train = self.settings.backtest_initial_train_matches
+        fold_size = self.settings.backtest_fold_size
+        if n < initial_train + fold_size:
+            report.skipped_reason = (
+                f"insufficient data for walk-forward backtesting ({n} completed matches; "
+                f"need >= {initial_train + fold_size})"
+            )
+            return report
+
+        team_row_ids = sorted({f.home_team_id for f, _ in completed_matches} | {f.away_team_id for f, _ in completed_matches})
+        teams_by_id = {t.id: t for t in self.db.query(Team).filter(Team.id.in_(team_row_ids)).all()}
+        team_ids = [teams_by_id[tid].canonical_team_id for tid in team_row_ids]
+        index_of = {row_id: i for i, row_id in enumerate(team_row_ids)}
+
+        def to_goal_record(f, r) -> GoalMatchRecord:
+            return GoalMatchRecord(index_of[f.home_team_id], index_of[f.away_team_id], r.home_goals, r.away_goals)
+
+        def to_gbdt_record(f, r) -> GBDTMatchRecord:
+            return GBDTMatchRecord(
+                teams_by_id[f.home_team_id].canonical_team_id,
+                teams_by_id[f.away_team_id].canonical_team_id,
+                r.home_goals,
+                r.away_goals,
+            )
+
+        gbdt_model = GBDTModel(
+            library,
+            {
+                "n_estimators": self.settings.gbdt_n_estimators,
+                "max_depth": self.settings.gbdt_max_depth,
+                "learning_rate": self.settings.gbdt_learning_rate,
+            },
+        )
+
+        predictions: list[FoldPrediction] = []
+        n_folds = 0
+        start = initial_train
+        while start < n:
+            fold_end = min(start + fold_size, n)
+            train_rows = completed_matches[:start]
+            fold_rows = completed_matches[start:fold_end]
+            n_folds += 1
+
+            try:
+                anchor_model = GoalModel(use_dc_adjustment=True, l2_regularization=self.settings.model_l2_regularization)
+                anchor_fit = anchor_model.fit(team_ids, [to_goal_record(f, r) for f, r in train_rows])
+                fit = gbdt_model.fit([to_gbdt_record(f, r) for f, r in train_rows], anchor_fit)
+            except Exception as exc:  # a single bad fold must not abort the whole backtest
+                logger.warning("backtest_fold_fit_failed", model_name=model_name, error=str(exc))
+                start = fold_end
+                continue
+
+            for f, r in fold_rows:
+                home_id = teams_by_id[f.home_team_id].canonical_team_id
+                away_id = teams_by_id[f.away_team_id].canonical_team_id
+                if home_id not in fit.attack or away_id not in fit.attack:
+                    continue  # team never appeared in this fold's training window
+
+                score = build_score_matrix(
+                    gbdt_model,
+                    fit,
+                    home_id,
+                    away_id,
+                    initial_max_goals=self.settings.score_matrix_initial_max_goals,
+                    tail_threshold=self.settings.score_matrix_tail_threshold,
+                    max_goals_cap=self.settings.score_matrix_max_goals_cap,
+                )
+                outcomes = outcome_probabilities(score.matrix)
+                pred_home, pred_away = expected_goals_from_matrix(score.matrix)
+
+                max_goals = score.matrix.shape[0] - 1
+                hg, ag = min(r.home_goals, max_goals), min(r.away_goals, max_goals)
+                exact_p = max(float(score.matrix[hg, ag]), 1e-12)
+                actual_idx = HOME if r.home_goals > r.away_goals else (DRAW if r.home_goals == r.away_goals else AWAY)
+
+                predictions.append(
+                    FoldPrediction(
+                        kickoff=f.kickoff_utc,
+                        predicted_outcome=(outcomes["home_win"], outcomes["draw"], outcomes["away_win"]),
+                        actual_outcome_index=actual_idx,
+                        exact_score_probability=exact_p,
+                        exact_score_log_loss=-float(np.log(exact_p)),
+                        predicted_home_goals=pred_home,
+                        predicted_away_goals=pred_away,
+                        actual_home_goals=r.home_goals,
+                        actual_away_goals=r.away_goals,
+                    )
+                )
+
+            start = fold_end
+
+        return self._finalize_report(report, competition, model_name, predictions, n_folds)
+
+    def _finalize_report(
+        self,
+        report: BacktestReport,
+        competition: Competition,
+        model_name: str,
+        predictions: list[FoldPrediction],
+        n_folds: int,
+    ) -> BacktestReport:
         if not predictions:
             report.skipped_reason = "no scoreable out-of-sample predictions across any fold"
             return report

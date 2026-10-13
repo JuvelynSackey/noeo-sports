@@ -79,12 +79,14 @@ def test_ensemble_trains_and_persists_normalized_weights(db_session):
     report = EnsembleService(db_session, settings).train(competition)
 
     assert report.trained
-    assert len(report.candidates) == 3
+    # 3 MLE candidates + 3 GBDT candidates (120 matches clears the GBDT
+    # family's own, higher eligibility threshold too).
+    assert len(report.candidates) == 6
     total_weight = sum(c.weight for c in report.candidates)
     assert total_weight == pytest.approx(1.0)
 
     weights = db_session.query(ModelWeight).filter_by(competition_id=competition.id).all()
-    assert len(weights) == 3
+    assert len(weights) == 6
     assert sum(w.weight for w in weights) == pytest.approx(1.0)
 
 
@@ -128,9 +130,14 @@ def test_ensemble_persists_walk_forward_backtest_per_candidate(db_session):
     EnsembleService(db_session, settings).train(competition)
 
     records = db_session.query(CalibrationResult).filter_by(competition_id=competition.id, forecast_type="walk_forward_backtest").all()
-    assert len(records) == 3
+    # 3 MLE candidates + 3 GBDT candidates (120 matches clears the GBDT
+    # family's own, higher eligibility threshold too).
+    assert len(records) == 6
     for record in records:
-        assert record.method in {"dixon_coles", "poisson_baseline", "hierarchical_model"}
+        assert record.method in {
+            "dixon_coles", "poisson_baseline", "hierarchical_model",
+            "xgboost_model", "lightgbm_model", "catboost_model",
+        }
         assert record.brier_score is not None
         assert record.log_loss is not None
         assert record.ranked_probability_score is not None
@@ -148,4 +155,4 @@ def test_rerun_replaces_rather_than_duplicates_weights(db_session):
     service.train(competition)
 
     weights = db_session.query(ModelWeight).filter_by(competition_id=competition.id).all()
-    assert len(weights) == 3  # old weights (pointing at retired versions) were cleared, not accumulated
+    assert len(weights) == 6  # old weights (pointing at retired versions) were cleared, not accumulated

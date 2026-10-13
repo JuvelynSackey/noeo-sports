@@ -34,6 +34,7 @@ This is being built in phases (see **Roadmap** below). Currently implemented:
 - **Phase 14 — Scenario engine and shock detection.**
 - **Phase 15 — Redis cache and local async job queue.**
 - **Phase 16 — Frontend (dashboard, fixtures, Match Intelligence).**
+- **Phase 17 — Gradient-boosted decision tree models (XGBoost, LightGBM, CatBoost).**
 
 Every phase in the original 12-phase roadmap has an initial implementation.
 That means "feature-complete against the 12-phase plan," not
@@ -183,6 +184,8 @@ app/
     models/       ORM models for every table in the target schema (see below)
   models/
     goal_model.py              shared Dixon-Coles / Poisson-baseline MLE engine
+    gbdt_model.py              XGBoost/LightGBM/CatBoost goal models (Phase 17) — same
+                                 (model, fit).score_matrix(...) call shape as goal_model.py
   forecasting/
     score_matrix.py             score matrix + every probability derived from it,
                                  plus the section-29 consistency checker
@@ -1453,6 +1456,135 @@ say more.
    environment that built this, so the visual result has not been seen,
    only the data it's built from.
 
+### Gradient-boosted decision tree models (Phase 17)
+
+The ensemble (Phase 6) had exactly one family of models in it: the
+Dixon-Coles/Poisson MLE (`app/models/goal_model.py`) in its three forms
+(`dixon_coles`, `poisson_baseline`, `hierarchical_model`). This phase adds
+a second, discriminative family — XGBoost, LightGBM and CatBoost — as
+full ensemble members: backtested, champion/challenger-gated, weighted,
+and actually blended into the live published forecast, not a side
+experiment bolted on afterward.
+
+1. **Scope decision: what a GBDT model is allowed to learn from**
+   (`app/models/gbdt_model.py`) — rather than inventing a separate
+   feature store this project has no data to back (no squad list, no
+   betting odds, no play-by-play), each GBDT model is trained on exactly
+   the signal the Poisson family already extracts for the same
+   competition and training window: that sync's own `dixon_coles` fit's
+   per-team attack/defence ratings and home advantage (5 features,
+   `FEATURE_NAMES`). Two independent Poisson-objective regressors per
+   library (home goals, away goals) learn a nonlinear combination of
+   those five numbers; no Dixon-Coles low-score correction, since that
+   correction's `rho` term is specific to the bivariate Poisson family,
+   not derived from anything a GBDT regressor produces.
+2. **Same shape as `GoalModel`/`GoalModelFit`, deliberately** —
+   `GBDTModel.score_matrix(fit, home_id, away_id, max_goals)` and
+   `GBDTModelFit.attack` (a property, `{team_id: attack}`) match
+   `GoalModel`/`GoalModelFit`'s own call shape exactly. That's not an
+   accident: `app/forecasting/score_matrix.py::build_score_matrix`,
+   `champion_challenger.py`'s holdout scoring, and
+   `forecast_service.py`'s ensemble blending all only ever call
+   `model.score_matrix(fit, ...)` and check `team_id in fit.attack` —
+   neither needed a single line changed to support a second model
+   family via plain duck typing, once `GBDTModel`/`GBDTModelFit`
+   presented the same shape.
+3. **Self-contained persistence** — a `GBDTModelFit` snapshots the
+   per-team `(attack, defence)` values and home advantage it was
+   trained against directly into itself, so prediction never needs the
+   original `dixon_coles` fit back (the same "snapshot everything
+   prediction needs" discipline `xg_model.py` already uses for its own
+   ratios). The two fitted regressors are pickled and base64-encoded
+   into the same `ModelVersion.parameters` JSON column every other
+   model already uses — one serialization scheme across three
+   otherwise very different libraries, round-trip-verified on every
+   save (`tests/test_gbdt_model.py`).
+4. **Walk-forward backtesting** (`app/services/backtesting.py`) — a
+   second candidate pool, `GBDT_CANDIDATES`, alongside the existing
+   `CANDIDATES`. Each fold fits a *fresh* `dixon_coles` anchor on that
+   fold's own training window first (the GBDT's only source of
+   features) and then the GBDT itself on the same window, before
+   predicting the fold's matches through the exact same
+   `build_score_matrix` call the MLE candidates use. `run()` (the MLE
+   path) is untouched line-for-line; `run_gbdt()` is a new, separate
+   method — deliberate duplication of the walk-forward setup over a
+   shared abstraction, to keep zero regression risk on the existing,
+   tested MLE path while adding the new one.
+5. **Champion/challenger promotion** (`app/services/
+   champion_challenger.py`) — `evaluate_and_promote_gbdt` mirrors
+   `evaluate_and_promote`'s exact staged-rollout decision tree (promote
+   outright with no champion or too little new evidence; otherwise
+   compare holdout log loss against the champion and only promote if
+   the challenger doesn't meaningfully regress), reconstructing/staging
+   a `GBDTModelFit` via a new `registry.stage_gbdt_challenger` instead
+   of a `GoalModelFit` one. `is_reproducible=False` for a GBDT
+   version — unlike the MLE fits' deterministic L-BFGS-B optimizer, a
+   tree ensemble's internal RNG isn't seeded or recorded, so claiming
+   reproducibility here would be dishonest.
+6. **Live training** (`app/services/model_training.py`) — a higher
+   eligibility threshold than the MLE family's own
+   (`gbdt_min_matches=60` vs. `min_matches_for_model_fit=10`), since a
+   tree ensemble has far more capacity to overfit a small sample than a
+   ~2N+1-parameter MLE does. Below it, all three GBDT models are
+   recorded `DISABLED` with an honest reason
+   (`"insufficient GBDT data (n < 60)"`), the same pattern every other
+   eligibility gate in this project already uses — never silently
+   skipped. A single library's training failure is caught and that one
+   model is disabled with the error as its reason; it never aborts the
+   rest of the sync.
+7. **Ensemble weighting and live forecast blending** — `ensemble.py`'s
+   candidate list is now `ALL_CANDIDATE_NAMES` (MLE + GBDT); weight
+   learning itself (softmax over walk-forward log loss) needed no
+   changes, since it already only cares about names and backtest
+   reports, not what produced them. `forecast_service.py`'s
+   `_build_ensemble_score` gained one new function,
+   `_reconstruct_member`, which dispatches on `model_version.model_name`
+   to build either a `(GoalModel, GoalModelFit)` or `(GBDTModel,
+   GBDTModelFit)` pair — everything after that point in the blending
+   loop is unchanged, again via the shared call shape from point 2.
+8. **What stays scoped to the MLE family only, unchanged** — three
+   things already applied only to `dixon_coles` specifically, before
+   this phase, and still do: calibration (`calibration.py` fits against
+   the `dixon_coles` champion only — poisson_baseline/
+   hierarchical_model were never calibrated separately either), drift
+   detection's parameter-PSI check (`drift_detection.py` only ever
+   compared `dixon_coles`'s own attack ratings across retrains), and the
+   scenario engine's what-if deltas (`scenario_engine.py` varies the
+   fixture's `dixon_coles` anchor fit specifically — a GBDT model has no
+   per-team attack/defence delta space to vary in the first place).
+   Nothing needed to change in any of the three to keep that true.
+9. **Frontend: zero code changes** — Model Lab, the Backtesting Centre,
+   and every other page that lists or compares models were already
+   written generically (whatever `model_name` values `GET /models`
+   happens to return), confirmed live: `xgboost_model`/`lightgbm_model`/
+   `catboost_model` show up in both pages automatically once trained,
+   with no frontend commit required for this phase at all.
+10. **Testing**: a new `tests/test_gbdt_model.py` (18 tests across all
+   three libraries) covers fitting, prediction, score-matrix
+   normalization, unknown-team handling, and the pickle/base64
+   round-trip. Every existing test file the new candidates ripple
+   through was extended rather than just left to fail: `test_backtesting.py`
+   (a dedicated `run_gbdt` test plus confirming an explicit `candidates=`
+   list still opts out of the GBDT pool), `test_champion_challenger.py`
+   (the same three-scenario coverage as the MLE gate, for GBDT),
+   `test_model_training.py` (GBDT models train/enable with enough data,
+   stay disabled below their own higher threshold), and
+   `test_ensemble.py`/`test_forecast_service.py` (hardcoded counts of
+   `3` updated to `6` where the behavior change is the entire point —
+   more ensemble members, not a regression). Full suite: 336 passed.
+   Checked live against the real running backend, including the path a
+   pytest in-memory session can't: triggered a real `POST /sync`
+   (default `gbdt_min_matches=60`, this project's own small mock
+   dataset correctly leaves all three `DISABLED` with the honest reason
+   above), then restarted with `GBDT_MIN_MATCHES=15` to clear that
+   threshold against the same ~19-match dataset and confirmed all three
+   actually train, reach `ENABLED`, appear in `GET /model-performance`
+   and `GET /backtests`, and — the actual point of this phase — appear
+   with real, nonzero, correctly-normalized weights in a live `POST
+   /forecast`'s `ensemble_weights`. Restarted once more afterward with
+   the default threshold and re-synced to leave the dev database back
+   in its honest, correctly-`DISABLED` default state.
+
 ## Roadmap
 
 1. **Database + provider abstraction + competition discovery** — done
@@ -1471,6 +1603,7 @@ say more.
 14. **Scenario engine + shock detection** — done (beyond the original 12-phase plan)
 15. **Redis cache + local async job queue** — done (beyond the original 12-phase plan)
 16. **Frontend: dashboard, fixtures, Match Intelligence, Model Lab, Backtesting Centre, Admin Centre, Scenario Lab, Data Intelligence, Teams, Forecast Centre, Live Centre, Reports, Competitions, System Intelligence, API Management** — done (beyond the original 12-phase plan; all 14 of section 24's named pages built, plus Scenario Lab as a 15th, unnamed one; API Management needed a new backend auth mechanism — `X-API-Key` keys alongside the JWT — built alongside it)
+17. **Gradient-boosted decision tree models (XGBoost, LightGBM, CatBoost)** — done (beyond the original 12-phase plan; a second, discriminative model family trained on the existing dixon_coles fit's own features, fully wired into walk-forward backtesting, champion/challenger promotion, ensemble weighting, and live forecast blending alongside the original Dixon-Coles/Poisson MLE family — Model Lab and the Backtesting Centre needed no frontend changes at all to show them)
 
 ## Safety & integrity
 

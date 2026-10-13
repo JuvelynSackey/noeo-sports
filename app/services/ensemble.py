@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings, get_settings
 from app.database.models.competitions import Competition
 from app.database.models.modeling import ModelVersion, ModelWeight
-from app.services.backtesting import CANDIDATES, BacktestReport, BacktestingService
+from app.services.backtesting import ALL_CANDIDATE_NAMES, BacktestReport, BacktestingService
 
 
 @dataclass
@@ -47,7 +47,7 @@ class EnsembleService:
 
         candidates = [
             CandidateResult(model_name=name, report=backtest_reports[name])
-            for name, _ in CANDIDATES
+            for name in ALL_CANDIDATE_NAMES
             if name in backtest_reports
             and backtest_reports[name].completed
             and len(backtest_reports[name].predictions) >= self.settings.ensemble_min_validation_matches
@@ -98,7 +98,7 @@ class EnsembleService:
         self.db.commit()
 
     def _clear_weights(self, competition: Competition) -> None:
-        candidate_names = [name for name, _ in CANDIDATES]
+        candidate_names = ALL_CANDIDATE_NAMES
         existing = (
             self.db.query(ModelWeight)
             .join(ModelVersion, ModelWeight.model_version_id == ModelVersion.id)

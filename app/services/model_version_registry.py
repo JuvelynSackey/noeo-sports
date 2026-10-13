@@ -17,6 +17,7 @@ from app.config import Settings
 from app.database.models.competitions import Competition
 from app.database.models.enums import ModelStatus
 from app.database.models.modeling import ModelVersion
+from app.models.gbdt_model import GBDTModelFit
 from app.models.goal_model import GoalModelFit
 
 
@@ -108,6 +109,47 @@ def stage_challenger(
                 "converged": fit.converged,
             },
             is_reproducible=True,
+        )
+    )
+    db.commit()
+    return version
+
+
+def stage_gbdt_challenger(
+    db: Session,
+    model_name: str,
+    competition: Competition,
+    fit: GBDTModelFit,
+    window_start: dt.datetime | None,
+    window_end: dt.datetime | None,
+) -> str:
+    """GBDT twin of `stage_challenger` — same CHALLENGER staging contract,
+    but `fit.to_parameters()`/`hyperparameters` are already a GBDT-shaped
+    dict (pickled regressors + a team-feature snapshot) rather than an
+    attack/defence/home-advantage/rho one."""
+    previous_challengers = (
+        db.query(ModelVersion)
+        .filter_by(model_name=model_name, competition_id=competition.id, status=ModelStatus.CHALLENGER)
+        .all()
+    )
+    for m in previous_challengers:
+        m.status = ModelStatus.RETIRED
+        m.disabled_reason = "superseded by a newer challenger fit"
+
+    version = uuid.uuid4().hex[:12]
+    db.add(
+        ModelVersion(
+            model_name=model_name,
+            version=version,
+            status=ModelStatus.CHALLENGER,
+            competition_id=competition.id,
+            trained_at=dt.datetime.now(dt.timezone.utc),
+            training_window_start=window_start,
+            training_window_end=window_end,
+            hyperparameters={"model_kind": "gbdt", "library": fit.library, **fit.hyperparameters},
+            parameters=fit.to_parameters(),
+            evaluation_metrics={"n_matches": fit.n_matches, "converged": fit.converged},
+            is_reproducible=False,  # a tree ensemble's own internal RNG isn't seeded/recorded, unlike the MLE fits
         )
     )
     db.commit()

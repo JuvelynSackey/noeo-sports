@@ -140,7 +140,12 @@ def test_ensemble_blend_differs_from_single_champion_matrix(db_session):
     result = ForecastService(db_session, settings).generate(fixture)
 
     assert result.forecast_status == ForecastStatus.ACTIVE
-    assert len(result.ensemble_weights) == 3
+    # 3 MLE candidates + 3 GBDT candidates (120 matches clears the GBDT
+    # family's own, higher eligibility threshold too).
+    assert set(result.ensemble_weights) == {
+        "dixon_coles", "poisson_baseline", "hierarchical_model",
+        "xgboost_model", "lightgbm_model", "catboost_model",
+    }
     assert sum(result.ensemble_weights.values()) == pytest.approx(1.0, abs=1e-6)
     assert result.model_disagreement_level is not None
 

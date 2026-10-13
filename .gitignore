@@ -14,3 +14,8 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 notebooks/.ipynb_checkpoints/
+
+# CatBoost writes training logs/metadata here by default; app/models/
+# gbdt_model.py passes allow_writing_files=False so the real application
+# never creates this, but a stray manual script easily can.
+catboost_info/

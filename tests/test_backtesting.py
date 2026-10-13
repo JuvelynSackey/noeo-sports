@@ -1,6 +1,6 @@
 from app.config import Settings
 from app.database.models.modeling import CalibrationResult
-from app.services.backtesting import CANDIDATES, BacktestingService
+from app.services.backtesting import ALL_CANDIDATE_NAMES, CANDIDATES, BacktestingService
 from tests.test_ensemble import _seed_realistic_league
 
 
@@ -49,8 +49,33 @@ def test_run_all_covers_every_candidate(db_session):
 
     reports = BacktestingService(db_session, settings).run_all(competition)
 
-    assert set(reports) == {name for name, _ in CANDIDATES}
+    assert set(reports) == set(ALL_CANDIDATE_NAMES)
     assert all(r.completed for r in reports.values())
+
+
+def test_run_all_with_an_explicit_candidate_list_skips_the_gbdt_pool(db_session):
+    """An explicit `candidates=` (e.g. a test isolating the MLE family)
+    opts out of the GBDT pool `run_all()` otherwise adds by default."""
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20)
+    competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)
+
+    reports = BacktestingService(db_session, settings).run_all(competition, candidates=CANDIDATES)
+
+    assert set(reports) == {name for name, _ in CANDIDATES}
+
+
+def test_run_gbdt_completes_with_enough_data(db_session):
+    settings = Settings(min_matches_for_model_fit=10, backtest_initial_train_matches=15, backtest_fold_size=20)
+    competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)  # 120 matches
+
+    report = BacktestingService(db_session, settings).run_gbdt(competition, "xgboost_model", "xgboost")
+
+    assert report.completed
+    assert report.n_folds > 1
+    assert len(report.predictions) > 0
+    assert report.metrics is not None
+    assert report.calibration_error is not None
+    assert report.total_goals_rmse is not None
 
 
 def test_backtest_persists_nothing_when_no_live_model_version(db_session):

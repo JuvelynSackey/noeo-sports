@@ -45,6 +45,7 @@ from app.forecasting.score_matrix import (
 )
 from app.evaluation.conformal import outcome_prediction_set
 from app.logging_config import get_logger
+from app.models.gbdt_model import GBDTModel, GBDTModelFit
 from app.models.goal_model import GoalModel, GoalModelFit
 from app.services.calibration import apply_calibration
 from app.services.market_models import CARDS_MODEL, CORNERS_MODEL, FIRST_HALF_MODEL
@@ -92,6 +93,25 @@ class ForecastResult:
 
 def _fit_from_model_version(mv: ModelVersion) -> GoalModelFit:
     return GoalModelFit.from_persisted_parameters(mv.parameters or {}, mv.evaluation_metrics or {})
+
+
+GBDT_MODEL_NAMES = {"xgboost_model", "lightgbm_model", "catboost_model"}
+
+
+def _reconstruct_member(model_version: ModelVersion):
+    """Returns `(model, fit, use_dc)` for either model family. Everything
+    downstream only ever calls `model.score_matrix(fit, home_id, away_id,
+    max_goals=...)` and checks `team_id in fit.attack` — both
+    `(GoalModel, GoalModelFit)` and `(GBDTModel, GBDTModelFit)` support
+    that identical call shape (see app/models/gbdt_model.py), so nothing
+    else in `_build_ensemble_score` needs to know which family a given
+    ENABLED model actually is."""
+    if model_version.model_name in GBDT_MODEL_NAMES:
+        fit = GBDTModelFit.from_persisted_parameters(model_version.parameters or {})
+        return GBDTModel(fit.library), fit, False
+    fit = _fit_from_model_version(model_version)
+    use_dc = bool((model_version.hyperparameters or {}).get("use_dc_adjustment", False))
+    return GoalModel(use_dc_adjustment=use_dc), fit, use_dc
 
 
 class ForecastService:
@@ -341,14 +361,13 @@ class ForecastService:
         if not weight_rows:
             return _single_model_fallback("ensemble weights unavailable for this competition; using dixon_coles alone")
 
-        members = []  # (model_name, weight, fit, use_dc)
+        members = []  # (model_name, weight, model, fit)
         for weight_row, model_version in weight_rows:
-            fit = _fit_from_model_version(model_version)
+            model, fit, _use_dc = _reconstruct_member(model_version)
             if home_id not in fit.attack or away_id not in fit.attack:
                 warnings.append(f"{model_version.model_name} excluded from the ensemble (team not in its training data)")
                 continue
-            use_dc = bool((model_version.hyperparameters or {}).get("use_dc_adjustment", False))
-            members.append((model_version.model_name, weight_row.weight, fit, use_dc))
+            members.append((model_version.model_name, weight_row.weight, model, fit))
 
         if not members:
             return _single_model_fallback("every ensemble member excluded (OOD teams); using dixon_coles alone")
@@ -356,8 +375,7 @@ class ForecastService:
         per_member = []
         max_goals_needed = self.settings.score_matrix_initial_max_goals
         outcomes_by_member: dict[str, tuple[float, float, float]] = {}
-        for name, weight, fit, use_dc in members:
-            model = GoalModel(use_dc_adjustment=use_dc)
+        for name, weight, model, fit in members:
             member_score = build_score_matrix(
                 model,
                 fit,

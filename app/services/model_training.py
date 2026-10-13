@@ -25,6 +25,7 @@ from app.database.models.enums import FixtureStatus
 from app.database.models.fixtures import Fixture, Result
 from app.database.models.teams import Team
 from app.logging_config import get_logger
+from app.models.gbdt_model import GBDTMatchRecord, GBDTModel
 from app.models.goal_model import GoalMatchRecord, GoalModel, GoalModelFit
 from app.services.champion_challenger import ChampionChallengerDecision, ChampionChallengerService, get_champion, split_by_champion_cutoff
 from app.services.hierarchical_shrinkage import shrink_fit
@@ -38,6 +39,15 @@ DIXON_COLES = "dixon_coles"
 POISSON_BASELINE = "poisson_baseline"
 HIERARCHICAL_MODEL = "hierarchical_model"
 
+# (model_name, library) — see app/models/gbdt_model.py. Each trains on the
+# same completed-matches window as the MLE family, using that same sync's
+# dixon_coles fit as its only features.
+GBDT_MODELS: list[tuple[str, str]] = [
+    ("xgboost_model", "xgboost"),
+    ("lightgbm_model", "lightgbm"),
+    ("catboost_model", "catboost"),
+]
+
 
 @dataclass
 class ModelTrainingReport:
@@ -46,6 +56,7 @@ class ModelTrainingReport:
     dixon_coles_version: str | None = None
     poisson_version: str | None = None
     hierarchical_version: str | None = None
+    gbdt_versions: dict[str, str | None] = field(default_factory=dict)
     n_matches: int = 0
     n_teams: int = 0
     team_strength_rows: int = 0
@@ -85,6 +96,8 @@ class ModelTrainingService:
             registry.record_disabled(self.db, DIXON_COLES, competition, eligibility.dixon_coles.reason)
             registry.record_disabled(self.db, POISSON_BASELINE, competition, eligibility.poisson_baseline.reason)
             registry.record_disabled(self.db, HIERARCHICAL_MODEL, competition, eligibility.dixon_coles.reason)
+            for gbdt_name, _ in GBDT_MODELS:
+                registry.record_disabled(self.db, gbdt_name, competition, eligibility.dixon_coles.reason)
             report.skipped_reason = eligibility.dixon_coles.reason
             return report
 
@@ -147,6 +160,42 @@ class ModelTrainingService:
         report.hierarchical_version = hierarchical_decision.version
         report.champion_challenger[HIERARCHICAL_MODEL] = hierarchical_decision
 
+        # --- Gradient-boosted decision tree models (XGBoost, LightGBM,
+        # CatBoost) — a discriminative family alongside the MLE one above,
+        # trained on dc_fit's own attack/defence/home-advantage as their
+        # only features (see app/models/gbdt_model.py). A higher match-count
+        # threshold than the MLE family's: a tree ensemble has more capacity
+        # to overfit a small sample than a ~2N+1-parameter MLE does.
+        def to_gbdt_record(f: Fixture, r: Result) -> GBDTMatchRecord:
+            return GBDTMatchRecord(
+                teams_by_id[f.home_team_id].canonical_team_id,
+                teams_by_id[f.away_team_id].canonical_team_id,
+                r.home_goals,
+                r.away_goals,
+            )
+
+        gbdt_eligibility = ModelEligibilityService(self.settings).evaluate_market(
+            n_matches, n_teams, "GBDT", threshold=self.settings.gbdt_min_matches
+        )
+        if not gbdt_eligibility.eligible:
+            for gbdt_name, _ in GBDT_MODELS:
+                registry.record_disabled(self.db, gbdt_name, competition, gbdt_eligibility.reason)
+                report.gbdt_versions[gbdt_name] = None
+        else:
+            gbdt_hyperparameters = {
+                "n_estimators": self.settings.gbdt_n_estimators,
+                "max_depth": self.settings.gbdt_max_depth,
+                "learning_rate": self.settings.gbdt_learning_rate,
+            }
+            for gbdt_name, library in GBDT_MODELS:
+                decision = self._train_gbdt_model(
+                    competition, gbdt_name, library, gbdt_hyperparameters, completed, team_ids, teams_by_id,
+                    to_record, to_gbdt_record, dc_model, dc_fit, gate, kickoff_window,
+                )
+                report.gbdt_versions[gbdt_name] = decision.version if decision else None
+                if decision:
+                    report.champion_challenger[gbdt_name] = decision
+
         recent_fit: GoalModelFit | None = None
         if eligibility.dynamic_strength.eligible:
             decayed_matches = self._apply_time_decay(matches, completed)
@@ -167,6 +216,52 @@ class ModelTrainingService:
         )
         report.team_strength_rows = len(strength_rows)
         return report
+
+    def _train_gbdt_model(
+        self,
+        competition: Competition,
+        model_name: str,
+        library: str,
+        hyperparameters: dict,
+        completed,
+        team_ids: list[str],
+        teams_by_id: dict[int, Team],
+        to_record,
+        to_gbdt_record,
+        dc_model: GoalModel,
+        dc_fit: GoalModelFit,
+        gate: ChampionChallengerService,
+        kickoff_window: tuple,
+    ) -> ChampionChallengerDecision | None:
+        """One GBDT library's full champion/challenger cycle — same "fair
+        eval-fit" discipline as the MLE candidates: the challenger is
+        compared against what a model trained on only what the *current*
+        champion already saw would have predicted, not the champion's own
+        frozen output. `eval_dc_fit` is a fresh `dixon_coles` fit scoped to
+        that same eval window, since `dc_fit`/`dc_eval_fit` above are
+        scoped to the *dixon_coles* champion's own cutoff, which won't
+        generally match this GBDT model's own."""
+        champion = get_champion(self.db, competition, model_name)
+        eval_rows, holdout = split_by_champion_cutoff(completed, teams_by_id, champion)
+
+        gbdt_model = GBDTModel(library, hyperparameters)
+        try:
+            full_fit = gbdt_model.fit([to_gbdt_record(f, r) for f, r in completed], dc_fit)
+        except Exception as exc:  # a bad fit for one library must not abort the whole sync
+            logger.warning("gbdt_training_failed", model_name=model_name, library=library, error=str(exc))
+            registry.record_disabled(self.db, model_name, competition, f"training failed: {exc}")
+            return None
+
+        eval_fit = None
+        if eval_rows and holdout:
+            try:
+                eval_dc_fit = dc_model.fit(team_ids, [to_record(f, r) for f, r in eval_rows])
+                eval_fit = gbdt_model.fit([to_gbdt_record(f, r) for f, r in eval_rows], eval_dc_fit)
+            except Exception as exc:
+                logger.warning("gbdt_eval_fit_failed", model_name=model_name, library=library, error=str(exc))
+                eval_fit = None  # falls back to PROMOTED_INSUFFICIENT_EVIDENCE, same as the MLE candidates do
+
+        return gate.evaluate_and_promote_gbdt(competition, model_name, champion, full_fit, eval_fit, holdout, *kickoff_window)
 
     def _games_played(self, team_ids: list[str], completed, teams_by_id: dict[int, Team]) -> dict[str, int]:
         counts: dict[str, int] = {tid: 0 for tid in team_ids}

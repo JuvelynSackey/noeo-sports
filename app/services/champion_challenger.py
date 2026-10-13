@@ -33,6 +33,7 @@ from app.database.models.teams import Team
 from app.evaluation.metrics import AWAY, DRAW, HOME, evaluate_predictions
 from app.forecasting.score_matrix import build_score_matrix, outcome_probabilities
 from app.logging_config import get_logger
+from app.models.gbdt_model import GBDTModel, GBDTModelFit
 from app.models.goal_model import GoalModel, GoalModelFit
 from app.services import model_version_registry as registry
 
@@ -110,6 +111,35 @@ def _score_holdout(model: GoalModel, fit: GoalModelFit, holdout: list[HoldoutMat
     """Mean log loss of `fit`'s outcome probabilities against the actual
     results in `holdout`. None if not a single holdout match is scoreable
     (e.g. every team in it is unknown to this fit)."""
+    predicted: list[tuple[float, float, float]] = []
+    actual: list[int] = []
+    for home_id, away_id, hg, ag in holdout:
+        if home_id not in fit.attack or away_id not in fit.attack:
+            continue
+        score = build_score_matrix(
+            model,
+            fit,
+            home_id,
+            away_id,
+            initial_max_goals=settings.score_matrix_initial_max_goals,
+            tail_threshold=settings.score_matrix_tail_threshold,
+            max_goals_cap=settings.score_matrix_max_goals_cap,
+        )
+        outcomes = outcome_probabilities(score.matrix)
+        predicted.append((outcomes["home_win"], outcomes["draw"], outcomes["away_win"]))
+        actual.append(HOME if hg > ag else (DRAW if hg == ag else AWAY))
+    if not predicted:
+        return None
+    return evaluate_predictions(predicted, actual).mean_log_loss
+
+
+def _score_holdout_gbdt(model: GBDTModel, fit: GBDTModelFit, holdout: list[HoldoutMatch], settings: Settings) -> float | None:
+    """GBDT twin of `_score_holdout` — identical scoring logic (mean log
+    loss of outcome probabilities against holdout results), just built
+    from a `(GBDTModel, GBDTModelFit)` pair instead of `(GoalModel,
+    GoalModelFit)`. `build_score_matrix` itself needs no changes either
+    way: `GBDTModel.score_matrix` has the same call signature as
+    `GoalModel.score_matrix`."""
     predicted: list[tuple[float, float, float]] = []
     actual: list[int] = []
     for home_id, away_id, hg, ag in holdout:
@@ -211,6 +241,91 @@ class ChampionChallengerService:
                     reason=reason,
                 )
 
+        self._log_decision(competition, model_name, decision)
+        return decision
+
+    def evaluate_and_promote_gbdt(
+        self,
+        competition: Competition,
+        model_name: str,
+        champion: ModelVersion | None,
+        full_fit: GBDTModelFit,
+        eval_fit: GBDTModelFit | None,
+        holdout: list[HoldoutMatch],
+        window_start: dt.datetime | None,
+        window_end: dt.datetime | None,
+    ) -> ChampionChallengerDecision:
+        """GBDT twin of `evaluate_and_promote` — identical staged-rollout
+        decision tree (promote outright with no champion or no new
+        evidence; otherwise compare holdout log loss against the champion
+        and promote only if the challenger doesn't meaningfully regress),
+        just reconstructing/staging a `GBDTModelFit` instead of a
+        `GoalModelFit`."""
+        version = registry.stage_gbdt_challenger(self.db, model_name, competition, full_fit, window_start, window_end)
+
+        if champion is None:
+            registry.promote(self.db, model_name, competition, version)
+            decision = ChampionChallengerDecision(
+                model_name, "PROMOTED_NO_CHAMPION", version, reason="no existing champion for this competition"
+            )
+        elif eval_fit is None or len(holdout) < self.settings.champion_challenger_min_new_matches:
+            registry.promote(self.db, model_name, competition, version)
+            decision = ChampionChallengerDecision(
+                model_name,
+                "PROMOTED_INSUFFICIENT_EVIDENCE",
+                version,
+                champion_version=champion.version,
+                n_new_matches=len(holdout),
+                reason=f"only {len(holdout)} match(es) completed since the champion's training window; promoted without comparison",
+            )
+        else:
+            champion_fit = GBDTModelFit.from_persisted_parameters(champion.parameters or {})
+            champion_model = GBDTModel(champion_fit.library)
+            challenger_model = GBDTModel(full_fit.library)
+            champion_loss = _score_holdout_gbdt(champion_model, champion_fit, holdout, self.settings)
+            challenger_loss = _score_holdout_gbdt(challenger_model, eval_fit, holdout, self.settings)
+
+            if champion_loss is None or challenger_loss is None:
+                registry.promote(self.db, model_name, competition, version)
+                decision = ChampionChallengerDecision(
+                    model_name,
+                    "PROMOTED_INSUFFICIENT_EVIDENCE",
+                    version,
+                    champion_version=champion.version,
+                    n_new_matches=len(holdout),
+                    reason="new matches not scoreable by one or both models (e.g. an unseen team)",
+                )
+            elif challenger_loss <= champion_loss + self.settings.champion_challenger_log_loss_tolerance:
+                registry.promote(self.db, model_name, competition, version)
+                reason = f"challenger log loss {challenger_loss:.4f} vs champion {champion_loss:.4f} on {len(holdout)} new match(es)"
+                decision = ChampionChallengerDecision(
+                    model_name,
+                    "PROMOTED",
+                    version,
+                    champion_version=champion.version,
+                    champion_log_loss=champion_loss,
+                    challenger_log_loss=challenger_loss,
+                    n_new_matches=len(holdout),
+                    reason=reason,
+                )
+            else:
+                reason = f"challenger log loss {challenger_loss:.4f} worse than champion {champion_loss:.4f} on {len(holdout)} new match(es)"
+                registry.reject_challenger(self.db, model_name, competition, version, reason)
+                decision = ChampionChallengerDecision(
+                    model_name,
+                    "REJECTED",
+                    version,
+                    champion_version=champion.version,
+                    champion_log_loss=champion_loss,
+                    challenger_log_loss=challenger_loss,
+                    n_new_matches=len(holdout),
+                    reason=reason,
+                )
+
+        self._log_decision(competition, model_name, decision)
+        return decision
+
+    def _log_decision(self, competition: Competition, model_name: str, decision: ChampionChallengerDecision) -> None:
         self.db.add(
             SystemEvent(
                 event_type="MODEL_PROMOTED" if decision.promoted else "MODEL_CHALLENGER_REJECTED",
@@ -220,4 +335,3 @@ class ChampionChallengerService:
             )
         )
         self.db.commit()
-        return decision

@@ -68,3 +68,39 @@ def test_team_strength_rows_have_all_expected_fields(db_session):
     assert row.opponent_adjusted_strength == row.attack_strength - row.defence_strength
     assert row.uncertainty is not None and row.uncertainty > 0
     assert row.method == "dixon_coles"
+
+
+def test_gbdt_models_train_and_enable_with_enough_data(db_session):
+    from app.config import Settings
+    from app.services.model_training import GBDT_MODELS, ModelTrainingService
+    from tests.test_ensemble import _seed_realistic_league
+
+    settings = Settings(min_matches_for_model_fit=10, gbdt_min_matches=60)
+    competition = _seed_realistic_league(db_session, n_rounds=4, settings=settings)  # 120 matches
+
+    report = ModelTrainingService(db_session, settings).train(competition)
+
+    for model_name, _ in GBDT_MODELS:
+        assert report.gbdt_versions.get(model_name) is not None, f"{model_name} should have trained"
+        mv = db_session.query(ModelVersion).filter_by(version=report.gbdt_versions[model_name]).one()
+        assert mv.status == ModelStatus.ENABLED
+        assert mv.hyperparameters["model_kind"] == "gbdt"
+
+
+def test_gbdt_models_disabled_below_their_own_higher_threshold(db_session):
+    from app.config import Settings
+    from app.services.model_training import GBDT_MODELS, ModelTrainingService
+    from tests.test_ensemble import _seed_realistic_league
+
+    # Enough for the MLE family (min_matches_for_model_fit=10) but below
+    # the GBDT-specific threshold.
+    settings = Settings(min_matches_for_model_fit=10, gbdt_min_matches=60)
+    competition = _seed_realistic_league(db_session, n_rounds=1, settings=settings)  # 30 matches
+
+    report = ModelTrainingService(db_session, settings).train(competition)
+
+    assert report.dixon_coles_version is not None
+    for model_name, _ in GBDT_MODELS:
+        assert report.gbdt_versions.get(model_name) is None
+        mv = [m for m in db_session.query(ModelVersion).filter_by(model_name=model_name).all()]
+        assert len(mv) == 1 and mv[0].status == ModelStatus.DISABLED
