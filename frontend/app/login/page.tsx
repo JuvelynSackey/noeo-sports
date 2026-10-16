@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth, ApiError } from "@/lib/auth";
@@ -32,6 +33,7 @@ export default function LoginPage() {
         onSubmit={handleSubmit}
         className="w-full max-w-sm rounded-xl border border-slate-800 bg-slate-900/60 p-6"
       >
+        <Image src="/logo-mark.png" alt="" width={56} height={36} className="mb-3" priority />
         <h1 className="mb-1 text-xl font-semibold text-white">
           NOEO <span className="text-cyan-400">SPORTS</span>
         </h1>

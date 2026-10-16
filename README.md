@@ -1358,9 +1358,10 @@ say more.
    much weaker threat model than a human-guessable password. There's no
    i18n/RTL (section
    85), no timezone preference beyond the browser's own (section 84 —
-   kickoff times render in whatever timezone the viewer's browser is in),
-   and no real NOEO SPORTS logo asset (just a typographic wordmark) since
-   none was supplied.
+   kickoff times render in whatever timezone the viewer's browser is in).
+   A real logo asset was supplied after this phase and wired in
+   separately (nav bar, login page, browser tab icon) — see **Logo
+   asset** below.
 18. **Testing**: both commands now also run in CI (see **Testing
    hardening and production deployment**'s **CI** sub-point) on every
    push/PR, alongside the backend's pytest job. `npm run build` and
@@ -1584,6 +1585,41 @@ experiment bolted on afterward.
    /forecast`'s `ensemble_weights`. Restarted once more afterward with
    the default threshold and re-synced to leave the dev database back
    in its honest, correctly-`DISABLED` default state.
+
+### Logo asset
+
+A real logo (icon mark + "NOEO SPORTS" wordmark + tagline, on a solid
+white background) was supplied after Phase 16 shipped with only a
+typographic wordmark. Two derived assets, generated once from the
+source image and committed as plain files rather than regenerated at
+build time: `frontend/public/logo-mark.png` (the icon alone — the
+stylized "N" with the ball forming the "O" — background keyed to
+transparent and tightly cropped) and `frontend/public/logo-full.png`
+(the complete lockup, same transparent-background treatment, kept for
+any future larger presentation use — not currently referenced by any
+page). `frontend/app/icon.png` is a square, padded crop of the mark,
+used as Next.js's `app/icon.*` convention for the browser tab icon
+(replacing the stock placeholder `favicon.ico` `create-next-app` had
+scaffolded, which is now deleted). The mark itself appears in the nav
+bar and on the login page, next to the existing styled "NOEO SPORTS"
+text rather than replacing it with a rasterized version — the text
+stays crisp at any size and keeps its cyan accent treatment.
+
+Wiring the logo into the nav bar surfaced a real, pre-existing layout
+bug that simply hadn't been visually checked before: with ten-plus nav
+links accumulated across every frontend phase, the brand block (now
+wider with the added image) would wrap "NOEO"/"SPORTS" onto separate
+lines at common viewport widths. Fixed by splitting the header into two
+rows — brand and account controls on a `flex-shrink-0` first row that
+never wraps, nav links in their own horizontally-scrollable second row
+below (`overflow-x-auto`) — rather than letting everything compete for
+space in one row. Checked with a real headless-Chromium screenshot
+(Playwright, installed just for this verification) at a 1280px desktop
+width and a 390px phone width; both hold up cleanly, and this is the
+first frontend change since Phase 16 where the actual rendered UI — not
+just data correctness — was visually confirmed, closing a limitation
+every earlier frontend phase's own testing section had to state
+explicitly.
 
 ## Roadmap
 

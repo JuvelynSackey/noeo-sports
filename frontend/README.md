@@ -109,6 +109,18 @@ never shipped to the browser); `npm audit fix --force` would downgrade
 actual Next.js 16.4.0, so it's left as a known, accepted advisory
 rather than "fixed" into a broken lint setup.
 
+The real logo asset (`public/logo-mark.png`/`logo-full.png`,
+`app/icon.png`; see the root README's **Logo asset** section) was the
+first frontend change actually checked with a real headless-Chromium
+screenshot (Playwright) rather than just build/lint/data-contract
+checks — every earlier phase's testing section had to say the rendered
+UI was unverified, since no browser-automation tool was available at
+the time. That screenshot caught a real, pre-existing nav-bar bug (ten-
+plus accumulated links wrapping the brand text onto separate lines at
+common viewport widths), fixed by splitting the header into a
+non-wrapping brand/account row and a horizontally-scrollable nav-links
+row, then re-verified at both a 1280px and a 390px viewport.
+
 Verified: `npm run build` and `npm run lint` both pass; every route's
 server-rendered HTML returns `200`; and the live backend's actual JSON
 responses (login → competitions → competition detail → fixtures →
